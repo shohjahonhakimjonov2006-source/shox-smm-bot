@@ -1,4 +1,4 @@
-aiogram==3.10.0
-motor==3.3.2
-aiohttp==3.9.5
-dnspython==2.6.1
+aiogram
+motor
+aiohttp
+dnspython
