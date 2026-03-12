@@ -6,14 +6,14 @@ import os
 import sys
 from datetime import datetime
 
-# AIOGRAM importlari
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup 
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (ReplyKeyboardMarkup, KeyboardButton, 
+                           InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove)
 
-# LOGLARNI SOZLASH
+# LOGLAR
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
 # --- SOZLAMALAR ---
@@ -31,20 +31,16 @@ services_col = db.services
 orders_col = db.orders
 
 # --- HOLATLAR (FSM) ---
-class OrderState(StatesGroup):
-    entering_link = State()
-    entering_quantity = State()
+class PaymentState(StatesGroup):
+    waiting_for_amount = State()
+    waiting_for_screenshot = State()
+
+class SupportState(StatesGroup):
+    waiting_for_message = State()
 
 class AdminState(StatesGroup):
     waiting_for_user_id = State()
     waiting_for_amount = State()
-    m_name = State()
-    m_price = State()
-    m_id = State()
-    m_cat = State()
-
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
 
 # --- KLAVIATURALAR ---
 main_menu = ReplyKeyboardMarkup(keyboard=[
@@ -53,7 +49,12 @@ main_menu = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="💰 Balans to'ldirish"), KeyboardButton(text="👨‍💻 Bog'lanish")]
 ], resize_keyboard=True)
 
-# --- FOYDALANUVCHI QISMI ---
+payment_kb = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="✅ To'lov qildim")],
+    [KeyboardButton(text="🏠 Orqaga")]
+], resize_keyboard=True)
+
+# --- START ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await users_col.update_one(
@@ -61,69 +62,102 @@ async def start_cmd(message: types.Message):
         {'$setOnInsert': {'balance': 0, 'total_deposited': 0}},
         upsert=True
     )
-    await message.answer("SMM Botga xush kelibsiz! Kerakli bo'limni tanlang:", reply_markup=main_menu)
+    await message.answer("SMM Botga xush kelibsiz!", reply_markup=main_menu)
 
-# --- 📊 BUYURTMALARIM QISMI ---
-@dp.message(F.text == "📊 Buyurtmalarim")
-async def my_orders(message: types.Message):
-    user_orders = await orders_col.find({'user_id': message.from_user.id}).sort('_id', -1).limit(10).to_list(length=10)
-    
-    if not user_orders:
-        return await message.answer("⚠️ Sizda hali buyurtmalar mavjud emas.")
-    
-    text = "📦 **Oxirgi 10 ta buyurtmangiz:**\n\n"
-    for o in user_orders:
-        text += f"🆔 ID: `{o.get('order_id')}`\n🔹 Xizmat: {o.get('service_name')}\n💰 Narxi: {o.get('cost')} so'm\n📅 Sana: {o.get('date')}\n\n"
-    
-    await message.answer(text, parse_mode="Markdown")
-
-# --- 💰 BALANS TO'LDIRISH ---
+# --- 💰 BALANS TO'LDIRISH TIZIMI ---
 @dp.message(F.text == "💰 Balans to'ldirish")
-async def top_up_balance(message: types.Message):
+async def pay_info(message: types.Message):
     text = (
-        "💳 **Hisobni to'ldirish usullari:**\n\n"
-        "1. Click/Payme orqali (Avtomatik emas)\n"
-        "2. Admin bilan bog'lanish orqali\n\n"
-        "To'lov qilish uchun adminga murojaat qiling va to'lov skrinshotini yuboring. "
-        "Admin hisobingizni tasdiqlagach, balansingizga pul qo'shiladi."
+        "💳 **To'lov tizimi:**\n\n"
+        "🔸 **Karta:** `9860030125568440`\n"
+        f"🔸 **ID:** `{message.from_user.id}`\n\n"
+        "👆 Ushbu karta raqamga xohlagan ilova orqali o'zingiz xohlagancha pul tashlang va chekni yuborib kuting.\n\n"
+        "⚠️ **Diqqat!** Kartaga pul tashlasangiz va necha pul tashlaganingizni yozishda xatoga yo'l qo'yib, "
+        "summada 1 so'mga ham adashsangiz sizning to'lovingiz tasdiqlanmaydi va pullar qaytarilmaydi!❗️\n\n"
+        "📞 To'lov tushishi kechiksa: +998883075131"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👨‍💻 Adminga yozish", url="https://t.me/shox_admin")] # O'zingizni linkizni qo'ying
+    await message.answer(text, reply_markup=payment_kb, parse_mode="Markdown")
+
+@dp.message(F.text == "✅ To'lov qildim")
+async def pay_confirm(message: types.Message, state: FSMContext):
+    await message.answer("💵 **To'lov miqdorini kiriting:**\n\nMinimal: 1000 so'm", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(PaymentState.waiting_for_amount)
+
+@dp.message(PaymentState.waiting_for_amount)
+async def pay_amount(message: types.Message, state: FSMContext):
+    if not message.text.isdigit() or int(message.text) < 1000:
+        return await message.answer("❌ Minimal 1000 so'm kiriting!")
+    
+    await state.update_data(amount=message.text)
+    await message.answer("🖼 **To'lov screenshotini (chekni) yuboring:**")
+    await state.set_state(PaymentState.waiting_for_screenshot)
+
+@dp.message(PaymentState.waiting_for_screenshot, F.photo)
+async def pay_screenshot(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    amount = data['amount']
+    user_id = message.from_user.id
+    
+    # Adminga yuborish
+    caption = (
+        "💰 **Yangi to'lov so'rovi!**\n\n"
+        f"👤 Foydalanuvchi: {message.from_user.full_name}\n"
+        f"🆔 ID: `{user_id}`\n"
+        f"💵 Summa: {amount} so'm\n"
+    )
+    
+    # Tasdiqlash tugmalari
+    admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Tasdiqlash", callback_data=f"pay_yes_{user_id}_{amount}")],
+        [InlineKeyboardButton(text="❌ Rad etish", callback_data=f"pay_no_{user_id}")]
     ])
-    await message.answer(text, reply_markup=kb, parse_mode="Markdown")
+    
+    await bot.send_photo(ADMIN_ID, photo=message.photo[-1].file_id, caption=caption, reply_markup=admin_kb, parse_mode="Markdown")
+    await message.answer("✅ To'lovingiz adminga yuborildi. Tasdiqlanishini kuting!", reply_markup=main_menu)
+    await state.clear()
 
-# --- 👨‍💻 BOG'LANISH ---
+# --- 👨‍💻 BOG'LANISH (SHIKOYAT) ---
 @dp.message(F.text == "👨‍💻 Bog'lanish")
-async def contact_admin(message: types.Message):
+async def support_start(message: types.Message, state: FSMContext):
+    await message.answer("✍️ Shikoyat yoki taklifingizni yozib qoldiring. Admin tez orada javob beradi:", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(SupportState.waiting_for_message)
+
+@dp.message(SupportState.waiting_for_message)
+async def support_finish(message: types.Message, state: FSMContext):
+    # Adminga shikoyatni yetkazish
     text = (
-        "👨‍💻 **Texnik yordam bo'limi**\n\n"
-        "Savollaringiz yoki muammolar bo'lsa, adminga murojaat qilishingiz mumkin:\n"
-        "📍 Telegram: @shox_admin\n"
-        "🕒 Ish vaqti: 09:00 - 22:00"
+        "📩 **Yangi shikoyat/xabar:**\n\n"
+        f"👤 Kimdan: {message.from_user.full_name}\n"
+        f"🆔 ID: `{message.from_user.id}`\n"
+        f"📝 Xabar: {message.text}"
     )
-    await message.answer(text)
+    await bot.send_message(ADMIN_ID, text, parse_mode="Markdown")
+    await message.answer("✅ Xabaringiz yuborildi!", reply_markup=main_menu)
+    await state.clear()
 
-# --- MENING HISOBIM ---
-@dp.message(F.text == "👤 Mening hisobim")
-async def my_acc(message: types.Message):
-    user = await users_col.find_one({'user_id': message.from_user.id})
-    balance = user.get('balance', 0) if user else 0
-    await message.answer(f"👤 **ID:** `{message.from_user.id}`\n💵 **Balans:** {balance:,.2f} so'm", parse_mode="Markdown")
+# --- ADMIN TO'LOVNI TASDIQLASHI ---
+@dp.callback_query(F.data.startswith("pay_"))
+async def admin_pay_process(callback: types.CallbackQuery):
+    _, action, uid, amount = callback.data.split("_")
+    uid = int(uid)
+    
+    if action == "yes":
+        amount = float(amount)
+        await users_col.update_one({'user_id': uid}, {'$inc': {'balance': amount, 'total_deposited': amount}})
+        await bot.send_message(uid, f"✅ To'lovingiz tasdiqlandi! Hisobingizga {amount:,.0f} so'm qo'shildi.")
+        await callback.message.edit_caption(caption=callback.message.caption + "\n\n✅ **TASDIQLANDI**")
+    else:
+        await bot.send_message(uid, "❌ Kechirasiz, to'lovingiz tasdiqlanmadi. Ma'lumotlarni tekshirib qayta yuboring.")
+        await callback.message.edit_caption(caption=callback.message.caption + "\n\n❌ **RAD ETILDI**")
+    
+    await callback.answer()
 
-# --- ADMIN PANEL VA BOSHQA FUNKSIYALAR ---
-# (Avvalgi koddagi Buyurtma berish va Admin funksiyalari shu yerda davom etadi)
+# --- ORQAGA TUGMASI ---
+@dp.message(F.text == "🏠 Orqaga")
+async def back_to_main(message: types.Message):
+    await message.answer("Asosiy menyu", reply_markup=main_menu)
 
-@dp.message(Command("admin"))
-async def admin_cmd(message: types.Message):
-    if message.from_user.id != ADMIN_ID: return
-    kb = ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="🔄 Xizmatlarni yangilash"), KeyboardButton(text="📊 Statistika")],
-        [KeyboardButton(text="💰 Balans qo'shish"), KeyboardButton(text="➕ Yangi xizmat qo'shish")],
-        [KeyboardButton(text="🏠 Asosiy menyu")]
-    ], resize_keyboard=True)
-    await message.answer("🛠 Admin paneli:", reply_markup=kb)
-
-# ... (Xizmatlarni yangilash va boshqa admin funksiyalari o'z joyida qoladi)
+# (Buyurtma berish, Admin panel kabi avvalgi funksiyalar kodning oxirida bo'lishi kerak)
 
 async def main():
     port = int(os.environ.get("PORT", 10000))
