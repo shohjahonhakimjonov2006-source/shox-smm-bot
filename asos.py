@@ -2,6 +2,7 @@ import logging
 import asyncio
 import aiohttp
 import motor.motor_asyncio
+import os
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -14,6 +15,7 @@ API_TOKEN = '8678413684:AAGTwgkxubtg47-eCSyhwZv2tQR0gvu0iHo'
 ADMIN_ID = 7861165622
 SMM_API_KEY = '00c9d8e11e3935fe8861533a792fd2fe'
 SMM_API_URL = 'https://smmapi.safobuilder.uz/shox_smmbot/api/v2'
+KARTA_RAQAM = "9860030125568441"
 
 # --- MONGODB ---
 MONGO_URL = "mongodb+srv://Zoirbek2003:Zoirbek2003@zoirbek2003.paka8jf.mongodb.net/?retryWrites=true&w=majority&appName=ZOirbek2003"
@@ -27,45 +29,34 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- HOLATLAR ---
 class OrderState(StatesGroup):
-    selecting_category = State()
-    selecting_service = State()
     entering_link = State()
     entering_quantity = State()
 
-# --- ASOSIY MENYU ---
+# --- MENYULAR ---
 main_menu = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🚀 Buyurtma berish")],
     [KeyboardButton(text="👤 Mening hisobim"), KeyboardButton(text="📊 Buyurtmalarim")],
     [KeyboardButton(text="💰 Balans to'ldirish"), KeyboardButton(text="👨‍💻 Bog'lanish")]
 ], resize_keyboard=True)
 
-# --- BUYURTMA BERISH (KATEGORIYALAR) ---
-def get_categories_kb():
-    categories = [
-        "Telegram", "Tik tok", "Stars va Premium", "Facebook", 
-        "Twitch", "Threads", "Instagram", "YouTube", 
-        "WhatsApp", "Twitter", "VK Obunachilar", "Tekin nakrutka"
-    ]
-    buttons = []
-    for i in range(0, len(categories), 2):
-        row = [KeyboardButton(text=categories[i])]
-        if i+1 < len(categories):
-            row.append(KeyboardButton(text=categories[i+1]))
-        buttons.append(row)
-    buttons.append([KeyboardButton(text="🏠 Asosiy menyu")])
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+social_menu = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="Telegram"), KeyboardButton(text="Tik tok")],
+    [KeyboardButton(text="Stars va Premium"), KeyboardButton(text="Facebook")],
+    [KeyboardButton(text="Instagram"), KeyboardButton(text="YouTube")],
+    [KeyboardButton(text="WhatsApp"), KeyboardButton(text="Twitter")],
+    [KeyboardButton(text="🏠 Asosiy menyu")]
+], resize_keyboard=True)
 
 # --- START ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await users_col.update_one(
         {'user_id': message.from_user.id},
-        {'$setOnInsert': {'balance': 0, 'total_spent': 0}},
+        {'$setOnInsert': {'balance': 0, 'total_deposited': 0}},
         upsert=True
     )
-    await message.answer("Xush kelibsiz!", reply_markup=main_menu)
+    await message.answer("Xush kelibsiz! Kerakli bo'limni tanlang:", reply_markup=main_menu)
 
 # --- MENING HISOBIM ---
 @dp.message(F.text == "👤 Mening hisobim")
@@ -73,130 +64,146 @@ async def my_account(message: types.Message):
     user = await users_col.find_one({'user_id': message.from_user.id})
     order_count = await orders_col.count_documents({'user_id': message.from_user.id})
     
+    balance = user.get('balance', 0) if user else 0
+    deposited = user.get('total_deposited', 0) if user else 0
+    
     text = (
         f"👤 Sizning ID raqamingiz: `{message.from_user.id}`\n\n"
-        f"💵 Balansingiz: {user.get('balance', 0):,.2f} so'm\n"
+        f"💵 Balansingiz: {balance:,.2f} so'm\n"
         f"📊 Buyurtmalaringiz: {order_count} ta\n"
-        f"💰 Kiritgan pullaringiz: {user.get('total_spent', 0):,.2f} so'm"
+        f"💰 Kiritgan pullaringiz: {deposited:,.2f} so'm"
     )
     await message.answer(text, parse_mode="Markdown")
 
-# --- BUYURTMA BERISH BOSHQARUV ---
+# --- BUYURTMA BERISH ---
 @dp.message(F.text == "🚀 Buyurtma berish")
-async def start_order(message: types.Message):
-    await message.answer("📁 Quyidagi ijtimoiy tarmoqlardan birini tanlang:", reply_markup=get_categories_kb())
+async def show_socials(message: types.Message):
+    await message.answer("📁 Quyidagi ijtimoiy tarmoqlardan birini tanlang:", reply_markup=social_menu)
 
-@dp.message(F.text.in_(["Telegram", "Instagram", "YouTube", "Tik tok", "Facebook", "Twitter"]))
-async def select_category(message: types.Message, state: FSMContext):
-    cat = message.text
-    # API'dan ushbu kategoriya bo'yicha xizmatlarni qidirish (Sizning API'ingizda kategoriya bo'yicha filter bo'lishi kerak)
-    # Hozircha bazadagi barcha xizmatlarni chiqarib turamiz:
-    services = await services_col.find().limit(15).to_list(length=15)
-    
+@dp.message(F.text.in_(["Telegram", "Tik tok", "Instagram", "YouTube", "Facebook", "Twitter", "WhatsApp"]))
+async def show_services(message: types.Message):
+    # Bu yerda API xizmatlari nomiga qarab filter qilishingiz mumkin. 
+    # Hozircha bazadagi xizmatlarni chiqaramiz.
+    services = await services_col.find().limit(20).to_list(length=20)
     if not services:
-        return await message.answer("Ushbu bo'limda xizmatlar topilmadi.")
-
+        return await message.answer("Xizmatlar topilmadi. Admin /admin orqali yangilashi kerak.")
+    
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{s['name'][:30]} - {s['price']} so'm", callback_data=f"srv_{s['id']}")] 
+        [InlineKeyboardButton(text=f"{s['name'][:30]} - {s['price']} so'm", callback_data=f"srv_{s['id']}")]
         for s in services
     ])
-    await message.answer(f"🔍 {cat} uchun xizmatni tanlang:", reply_markup=kb)
+    await message.answer(f"📁 {message.text} bo'limi. Xizmatni tanlang:", reply_markup=kb)
 
-# --- BUYURTMALARIM (RO'YXAT) ---
+# --- BUYURTMALARIM ---
 @dp.message(F.text == "📊 Buyurtmalarim")
-async def order_list(message: types.Message):
+async def my_orders(message: types.Message):
     orders = await orders_col.find({'user_id': message.from_user.id}).sort('_id', -1).limit(10).to_list(length=10)
     if not orders:
-        return await message.answer("Sizda hali buyurtmalar yo'q.")
-
+        return await message.answer("Sizda hali buyurtmalar mavjud emas.")
+    
     text = "📊 **Buyurtmalar:**\n\n"
-    kb = []
+    kb_list = []
     for o in orders:
         status = "✅ Bajarilgan" if o.get('status') == "Completed" else "⏳ Jarayonda"
         text += f"🆔 ID: {o['order_id']} | API\n📁 Xizmat: {o['service_name']}\n♻️ Holat: {status}\n⏰ Sana: {o['date']}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-        kb.append([InlineKeyboardButton(text=f"🛒 Buyurtma #{o['order_id']}", callback_data=f"view_{o['order_id']}")])
-
-    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
-
-# --- BUYURTMA DETALLARI ---
-@dp.callback_query(F.data.startswith("view_"))
-async def view_order_detail(callback: types.CallbackQuery):
-    order_id = int(callback.data.split("_")[1])
-    order = await orders_col.find_one({'order_id': order_id})
+        kb_list.append([InlineKeyboardButton(text=f"ID: {o['order_id']}", callback_data=f"view_{o['order_id']}")])
     
-    if not order:
-        return await callback.answer("Ma'lumot topilmadi.")
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_list), parse_mode="Markdown")
 
+@dp.callback_query(F.data.startswith("view_"))
+async def detail_order(callback: types.CallbackQuery):
+    o_id = callback.data.split("_")[1]
+    order = await orders_col.find_one({'order_id': int(o_id)})
+    if not order: return await callback.answer("Ma'lumot topilmadi.")
+    
     status = "✅ Bajarilgan" if order.get('status') == "Completed" else "⏳ Jarayonda"
-    detail = (
+    res = (
         f"🆔 Buyurtma IDsi: {order['order_id']}\n\n"
         f"📁 {order['service_name']}\n\n"
         f"♻️ Holat: {status}\n"
         f"🔗 Havola: {order['link']}\n"
         f"🔢 Miqdor: {order['quantity']} ta\n"
-        f"💰 Narxi: {order['cost']:,.2f} so'm\n\n"
+        f"💰 Narxi: {order['cost']:,.2f} so'm\n"
         f"⏰ Sana: {order['date']}"
     )
-    await callback.message.answer(detail, disable_web_page_preview=True)
+    await callback.message.answer(res, disable_web_page_preview=True)
     await callback.answer()
 
-# --- BUYURTMA JARAYONI (Qisqacha) ---
+# --- BUYURTMA BERISH LOGIKASI ---
 @dp.callback_query(F.data.startswith("srv_"))
-async def order_process(callback: types.CallbackQuery, state: FSMContext):
+async def srv_click(callback: types.CallbackQuery, state: FSMContext):
     s_id = callback.data.split("_")[1]
     service = await services_col.find_one({'id': s_id})
+    
+    if not service:
+        return await callback.message.answer("Xatolik: Xizmat topilmadi. Admin xizmatlarni yangilashi shart.")
+        
     await state.update_data(s_id=s_id, s_name=service['name'], s_price=service['price'])
     await callback.message.answer(f"📌 {service['name']}\n\n🔗 Havolani yuboring:")
     await state.set_state(OrderState.entering_link)
 
 @dp.message(OrderState.entering_link)
-async def get_link(message: types.Message, state: FSMContext):
+async def process_link(message: types.Message, state: FSMContext):
     await state.update_data(link=message.text)
     await message.answer("🔢 Miqdorni kiriting:")
     await state.set_state(OrderState.entering_quantity)
 
 @dp.message(OrderState.entering_quantity)
-async def get_qty(message: types.Message, state: FSMContext):
-    if not message.text.isdigit(): return await message.answer("Faqat raqam!")
+async def process_qty(message: types.Message, state: FSMContext):
+    if not message.text.isdigit(): return await message.answer("Faqat raqam kiriting!")
     qty = int(message.text)
     data = await state.get_data()
-    total_cost = (data['s_price'] / 1000) * qty
+    cost = (data['s_price'] / 1000) * qty
     
     user = await users_col.find_one({'user_id': message.from_user.id})
-    if user['balance'] < total_cost:
-        return await message.answer("Mablag' yetarli emas!")
+    if user['balance'] < cost:
+        return await message.answer(f"⚠️ Balans yetarli emas! Narxi: {cost} so'm")
 
-    # API-ga yuborish
     async with aiohttp.ClientSession() as session:
         params = {'key': SMM_API_KEY, 'action': 'add', 'service': data['s_id'], 'link': data['link'], 'quantity': qty}
         async with session.post(SMM_API_URL, data=params) as resp:
             res = await resp.json()
             if 'order' in res:
+                await users_col.update_one({'user_id': message.from_user.id}, {'$inc': {'balance': -cost}})
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 await orders_col.insert_one({
-                    'order_id': res['order'], 
-                    'user_id': message.from_user.id,
-                    'service_name': data['s_name'],
-                    'cost': total_cost,
-                    'link': data['link'],
-                    'quantity': qty,
-                    'status': 'In Progress',
-                    'date': now
+                    'order_id': res['order'], 'user_id': message.from_user.id,
+                    'service_name': data['s_name'], 'cost': cost, 'link': data['link'],
+                    'quantity': qty, 'date': now, 'status': 'Pending'
                 })
-                await users_col.update_one({'user_id': message.from_user.id}, {'$inc': {'balance': -total_cost}})
-                
-                # ADMINGA HABAR
-                await bot.send_message(ADMIN_ID, f"🔔 Yangi buyurtma!\nUser: {message.from_user.id}\nID: {res['order']}\nSumma: {total_cost} so'm")
+                await bot.send_message(ADMIN_ID, f"🔔 Yangi buyurtma!\nID: {res['order']}\nUser: {message.from_user.id}\nSumma: {cost}")
                 await message.answer(f"✅ Buyurtma qabul qilindi!\nID: {res['order']}", reply_markup=main_menu)
             else:
-                await message.answer("API xatosi!")
+                await message.answer("❌ API xatosi.")
     await state.clear()
 
+# --- ADMIN: XIZMATLARNI YANGILASH ---
+@dp.message(Command("admin"))
+async def admin_cmd(message: types.Message):
+    if message.from_user.id == ADMIN_ID:
+        kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🔄 Xizmatlarni yangilash")], [KeyboardButton(text="🏠 Asosiy menyu")]], resize_keyboard=True)
+        await message.answer("Admin paneli:", reply_markup=kb)
+
+@dp.message(F.text == "🔄 Xizmatlarni yangilash")
+async def update_srv(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
+    async with aiohttp.ClientSession() as session:
+        async with session.post(SMM_API_URL, data={'key': SMM_API_KEY, 'action': 'services'}) as r:
+            data = await r.json()
+            if isinstance(data, list):
+                await services_col.delete_many({})
+                for s in data:
+                    await services_col.insert_one({'id': str(s['service']), 'name': s['name'], 'price': float(s['rate']), 'min': int(s['min'])})
+                await message.answer("✅ Xizmatlar yangilandi!")
+
 @dp.message(F.text == "🏠 Asosiy menyu")
-async def go_home(message: types.Message):
+async def back_main(message: types.Message):
     await message.answer("Asosiy menyu", reply_markup=main_menu)
 
+# --- RENDER TIMEOUT YECHIMI ---
 async def main():
+    port = int(os.environ.get("PORT", 10000))
+    asyncio.create_task(asyncio.start_server(lambda r, w: None, '0.0.0.0', port))
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
