@@ -6,14 +6,14 @@ import os
 import sys
 from datetime import datetime
 
-# AIOGRAM importlari
+# AIOGRAM importlari - StatesGroup xatosini aynan shu qator tuzatadi
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.state import State, StatesGroup 
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# LOGLARNI SOZLASH (Xatolarni terminalda ko'rish uchun)
+# LOGLARNI SOZLASH
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
 # --- SOZLAMALAR ---
@@ -82,11 +82,11 @@ async def list_services(message: types.Message):
     if not services:
         return await message.answer(f"😔 {cat} bo'limida xizmatlar topilmadi.")
     
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{s['name'][:30]} - {s['price']} so'm", callback_data=f"srv_{s['id']}")]
-        for s in services
-    ])
-    await message.answer(f"📁 {cat} xizmatlari:", reply_markup=kb)
+    kb_list = []
+    for s in services:
+        kb_list.append([InlineKeyboardButton(text=f"{s['name'][:30]} - {s['price']} so'm", callback_data=f"srv_{s['id']}")])
+    
+    await message.answer(f"📁 {cat} xizmatlari:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_list))
 
 @dp.callback_query(F.data.startswith("srv_"))
 async def service_select(callback: types.CallbackQuery, state: FSMContext):
@@ -121,10 +121,6 @@ async def process_qty(message: types.Message, state: FSMContext):
             res = await resp.json()
             if 'order' in res:
                 await users_col.update_one({'user_id': message.from_user.id}, {'$inc': {'balance': -cost}})
-                await orders_col.insert_one({
-                    'order_id': res['order'], 'user_id': message.from_user.id,
-                    'service_name': data['s_name'], 'cost': cost, 'date': datetime.now().strftime("%Y-%m-%d %H:%M")
-                })
                 await message.answer(f"✅ Buyurtma qabul qilindi! ID: {res['order']}", reply_markup=main_menu)
             else:
                 await message.answer(f"❌ Xato: {res.get('error')}")
@@ -180,18 +176,22 @@ async def add_bal_start(message: types.Message, state: FSMContext):
 
 @dp.message(AdminState.waiting_for_user_id)
 async def add_bal_uid(message: types.Message, state: FSMContext):
+    if not message.text.isdigit(): return await message.answer("ID faqat raqam bo'ladi!")
     await state.update_data(uid=int(message.text))
     await message.answer("Summani kiriting:")
     await state.set_state(AdminState.waiting_for_amount)
 
 @dp.message(AdminState.waiting_for_amount)
 async def add_bal_final(message: types.Message, state: FSMContext):
-    amount = float(message.text)
-    data = await state.get_data()
-    await users_col.update_one({'user_id': data['uid']}, {'$inc': {'balance': amount, 'total_deposited': amount}})
-    await message.answer(f"✅ {data['uid']} hisobiga {amount} so'm qo'shildi.")
-    try: await bot.send_message(data['uid'], f"✅ Hisobingiz {amount} so'mga to'ldirildi!")
-    except: pass
+    try:
+        amount = float(message.text)
+        data = await state.get_data()
+        await users_col.update_one({'user_id': data['uid']}, {'$inc': {'balance': amount, 'total_deposited': amount}}, upsert=True)
+        await message.answer(f"✅ {data['uid']} hisobiga {amount} so'm qo'shildi.")
+        try: await bot.send_message(data['uid'], f"✅ Hisobingiz {amount} so'mga to'ldirildi!")
+        except: pass
+    except:
+        await message.answer("❌ Xato! Summani to'g'ri kiriting.")
     await state.clear()
 
 @dp.message(F.text == "➕ Yangi xizmat qo'shish")
@@ -232,7 +232,7 @@ async def back_home(message: types.Message):
 # --- RENDER PORT VA ISHGA TUSHIRISH ---
 async def main():
     port = int(os.environ.get("PORT", 10000))
-    # Render portini ulab qo'yish (xatolikni oldini oladi)
+    # Render "No open ports detected" xatosini oldini olish
     asyncio.create_task(asyncio.start_server(lambda r, w: None, '0.0.0.0', port))
     await dp.start_polling(bot)
 
