@@ -1,7 +1,7 @@
 import logging
 import asyncio
-import sqlite3
 import aiohttp
+import motor.motor_asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -15,16 +15,17 @@ SMM_API_KEY = '00c9d8e11e3935fe8861533a792fd2fe'
 SMM_API_URL = 'https://smmapi.safobuilder.uz/shox_smmbot/api/v2'
 KARTA_RAQAM = "9860030125568441"
 
+# --- MONGODB ULANISH ---
+# Siz bergan ulanish kodi muvaffaqiyatli qo'shildi
+MONGO_URL = "mongodb+srv://Zoirbek2003:Zoirbek2003@zoirbek2003.paka8jf.mongodb.net/?retryWrites=true&w=majority&appName=ZOirbek2003"
+client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
+db = client.smm_pro_database
+
+users_col = db.users
+services_col = db.services
+orders_col = db.orders
+
 logging.basicConfig(level=logging.INFO)
-
-# --- MA'LUMOTLAR BAZASI ---
-db = sqlite3.connect("smm_pro.db")
-cursor = db.cursor()
-cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, balance REAL DEFAULT 0)''')
-cursor.execute('''CREATE TABLE IF NOT EXISTS services (id INTEGER PRIMARY KEY, name TEXT, price REAL, min_qty INTEGER, max_qty INTEGER)''')
-cursor.execute('''CREATE TABLE IF NOT EXISTS orders (order_id TEXT, user_id INTEGER, service_name TEXT, quantity INTEGER, cost REAL)''')
-db.commit()
-
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
@@ -70,17 +71,23 @@ async def admin_panel(message: types.Message):
 @dp.message(F.text == "🔄 Xizmatlarni yangilash")
 async def sync_services(message: types.Message):
     if message.from_user.id != ADMIN_ID: return
+    await message.answer("Xizmatlar yangilanmoqda...")
     async with aiohttp.ClientSession() as session:
         async with session.post(SMM_API_URL, data={'key': SMM_API_KEY, 'action': 'services'}) as response:
             services = await response.json()
             if isinstance(services, list):
-                cursor.execute("DELETE FROM services")
+                await services_col.delete_many({}) 
                 for s in services:
-                    cursor.execute("INSERT INTO services VALUES (?, ?, ?, ?, ?)", (s['service'], s['name'], float(s['rate']), int(s['min']), int(s['max'])))
-                db.commit()
-                await message.answer(f"✅ Xizmatlar yangilandi!")
+                    await services_col.insert_one({
+                        'id': s['service'],
+                        'name': s['name'],
+                        'price': float(s['rate']),
+                        'min': int(s['min']),
+                        'max': int(s['max'])
+                    })
+                await message.answer(f"✅ {len(services)} ta xizmat MongoDB-ga yuklandi!")
 
-# --- BOG'LANISH BO'LIMI ---
+# --- BOG'LANISH ---
 @dp.message(F.text == "👨‍💻 Bog'lanish")
 async def support_start(message: types.Message, state: FSMContext):
     await message.answer("📑 Murojaat matnini yozib yuboring.")
@@ -88,133 +95,133 @@ async def support_start(message: types.Message, state: FSMContext):
 
 @dp.message(SupportState.waiting_message)
 async def support_finish(message: types.Message, state: FSMContext):
-    await bot.send_message(ADMIN_ID, f"📩 **Yangi murojaat!**\n\n👤 Kimdan: {message.from_user.full_name}\n🆔 ID: `{message.from_user.id}`\n\n📝 Matn: {message.text}")
+    await bot.send_message(ADMIN_ID, f"📩 Yangi murojaat!\n👤 Ism: {message.from_user.full_name}\nID: `{message.from_user.id}`\n\n📝 Matn: {message.text}")
     await message.answer("✅ Murojaatingiz yuborildi. Tez orada javob beramiz.")
     await state.clear()
 
-# --- BUYURTMALARIM BO'LIMI ---
+# --- BUYURTMALARIM ---
 @dp.message(F.text == "📊 Buyurtmalarim")
 async def my_orders(message: types.Message):
-    cursor.execute("SELECT order_id, service_name, quantity, cost FROM orders WHERE user_id = ? ORDER BY rowid DESC LIMIT 10", (message.from_user.id,))
-    rows = cursor.fetchall()
+    cursor = orders_col.find({'user_id': message.from_user.id}).sort('_id', -1).limit(10)
+    rows = await cursor.to_list(length=10)
     if not rows:
         return await message.answer("Sizda hali buyurtmalar mavjud emas.")
     
     msg = "📊 **Oxirgi 10 ta buyurtmangiz:**\n\n"
     for r in rows:
-        msg += f"🆔 ID: `{r[0]}`\n🔹 Xizmat: {r[1]}\n🔢 Miqdor: {r[2]}\n💰 Narx: {r[3]} so'm\n"
-        msg += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        msg += f"🆔 ID: `{r['order_id']}`\n🔹 {r['service_name']}\n💰 {r['cost']} so'm\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
     await message.answer(msg, parse_mode="Markdown")
+
+# --- PROFIL ---
+@dp.message(F.text == "👤 Profil")
+async def user_profile(message: types.Message):
+    user = await users_col.find_one({'user_id': message.from_user.id})
+    balance = user.get('balance', 0) if user else 0
+    await message.answer(f"👤 Profilingiz:\n🆔 ID: `{message.from_user.id}`\n💰 Balans: {balance} so'm")
 
 # --- BUYURTMA BERISH ---
 @dp.message(F.text == "🚀 Buyurtma berish")
-async def order_begin(message: types.Message):
-    cursor.execute("SELECT id, name, price FROM services LIMIT 25")
-    rows = cursor.fetchall()
-    if not rows: return await message.answer("Xizmatlar topilmadi.")
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{r[1][:30]} | {r[2]} so'm", callback_data=f"order_{r[0]}")] for r in rows])
-    await message.answer("Kerakli xizmatni tanlang:", reply_markup=kb)
+async def order_start(message: types.Message):
+    services = await services_col.find().limit(25).to_list(length=25)
+    if not services: return await message.answer("Xizmatlar topilmadi. Admin /admin menyusidan yangilashi kerak.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{s['name'][:25]} | {s['price']} so'm", callback_data=f"order_{s['id']}")] for s in services])
+    await message.answer("Xizmatni tanlang:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("order_"))
-async def order_step1(callback: types.CallbackQuery, state: FSMContext):
+async def order_select(callback: types.CallbackQuery, state: FSMContext):
     s_id = callback.data.split("_")[1]
-    cursor.execute("SELECT name, price, min_qty, max_qty FROM services WHERE id = ?", (s_id,))
-    s = cursor.fetchone()
-    await state.update_data(s_id=s_id, s_name=s[0], s_price=s[1], min_q=s[2], max_q=s[3])
-    await callback.message.answer(f"📌 {s[0]}\n💸 1000 tasi: {s[1]} so'm\n\n🔗 Havolani yuboring:")
+    service = await services_col.find_one({'id': s_id})
+    await state.update_data(s_id=s_id, s_name=service['name'], s_price=service['price'], min_q=service['min'])
+    await callback.message.answer(f"📌 {service['name']}\n\n🔗 Havolani yuboring:")
     await state.set_state(OrderState.entering_link)
 
 @dp.message(OrderState.entering_link)
-async def order_step2(message: types.Message, state: FSMContext):
+async def order_link(message: types.Message, state: FSMContext):
     await state.update_data(link=message.text)
     data = await state.get_data()
-    await message.answer(f"🔢 Miqdorni kiriting (Min: {data['min_q']} | Max: {data['max_q']}):")
+    await message.answer(f"🔢 Miqdorni kiriting (Min: {data['min_q']}):")
     await state.set_state(OrderState.entering_quantity)
 
 @dp.message(OrderState.entering_quantity)
-async def order_step3(message: types.Message, state: FSMContext):
-    if not message.text.isdigit(): return await message.answer("Raqam kiriting!")
+async def order_qty(message: types.Message, state: FSMContext):
+    if not message.text.isdigit(): return await message.answer("Iltimos, faqat raqam kiriting!")
     qty = int(message.text)
     data = await state.get_data()
-    total = (data['s_price'] / 1000) * qty
+    total_cost = (data['s_price'] / 1000) * qty
     
-    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (message.from_user.id,))
-    balance = cursor.fetchone()[0]
+    user = await users_col.find_one({'user_id': message.from_user.id})
+    current_balance = user.get('balance', 0) if user else 0
     
-    if balance < total: return await message.answer("Hisobingizda mablag' yetarli emas!")
+    if current_balance < total_cost:
+        return await message.answer(f"⚠️ Mablag' yetarli emas!\nKerak: {total_cost} so'm\nSizda: {current_balance} so'm")
 
     async with aiohttp.ClientSession() as session:
         params = {'key': SMM_API_KEY, 'action': 'add', 'service': data['s_id'], 'link': data['link'], 'quantity': qty}
         async with session.post(SMM_API_URL, data=params) as resp:
             res = await resp.json()
             if 'order' in res:
-                cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (total, message.from_user.id))
-                cursor.execute("INSERT INTO orders VALUES (?, ?, ?, ?, ?)", (res['order'], message.from_user.id, data['s_name'], qty, total))
-                db.commit()
+                await users_col.update_one({'user_id': message.from_user.id}, {'$inc': {'balance': -total_cost}})
+                await orders_col.insert_one({
+                    'order_id': res['order'], 
+                    'user_id': message.from_user.id, 
+                    'service_name': data['s_name'], 
+                    'cost': total_cost
+                })
                 await message.answer(f"✅ Buyurtma qabul qilindi!\n🆔 ID: {res['order']}")
             else:
-                await message.answer("❌ Xatolik yuz berdi. Keyinroq urinib ko'ring.")
+                await message.answer("❌ API xatosi yuz berdi. Keyinroq urinib ko'ring.")
     await state.clear()
 
-# --- BALANS TO'LDIRISH VA BOSHQA FUNKSIYALAR ---
-@dp.message(F.text == "💰 Balans to'ldirish")
-async def bal_start(message: types.Message):
-    msg = f"To'lov tizimi: 🔹 Payme\n\nKarta: `{KARTA_RAQAM}`\nID: `{message.from_user.id}`\n\nChekni yuboring va kuting."
-    await message.answer(msg, reply_markup=payment_kb, parse_mode="Markdown")
-
-@dp.callback_query(F.data == "pay_done")
-async def pay_confirm(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("💵 To'lov miqdorini kiriting:")
-    await state.set_state(PaymentState.entering_amount)
-
-@dp.message(PaymentState.entering_amount)
-async def pay_amt(message: types.Message, state: FSMContext):
-    await state.update_data(amt=message.text)
-    await message.answer("📸 Screenshot yuboring:")
-    await state.set_state(PaymentState.sending_screenshot)
-
-@dp.message(PaymentState.sending_screenshot, F.photo)
-async def pay_photo(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    await bot.send_photo(ADMIN_ID, message.photo[-1].file_id, caption=f"💰 To'lov!\nID: `{message.from_user.id}`\nSumma: {data['amt']}")
-    await message.answer("✅ Yuborildi. Admin tasdiqlashini kuting.")
-    await state.clear()
-
+# --- BALANS QO'SHISH (ADMIN) ---
 @dp.message(F.text == "💸 Balans qo'shish")
-async def adm_add_start(message: types.Message, state: FSMContext):
-    if message.from_user.id == ADMIN_ID:
-        await message.answer("User ID:")
-        await state.set_state(AdminState.add_bal_id)
+async def add_bal_start(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    await message.answer("User ID sini kiriting:")
+    await state.set_state(AdminState.add_bal_id)
 
 @dp.message(AdminState.add_bal_id)
-async def adm_add_id(message: types.Message, state: FSMContext):
-    await state.update_data(uid=message.text)
-    await message.answer("Summa:")
+async def add_bal_id_proc(message: types.Message, state: FSMContext):
+    if not message.text.isdigit(): return await message.answer("ID faqat raqam bo'lishi kerak!")
+    await state.update_data(target_id=int(message.text))
+    await message.answer("Qancha qo'shmoqchisiz (summa):")
     await state.set_state(AdminState.add_bal_amount)
 
 @dp.message(AdminState.add_bal_amount)
-async def adm_add_fin(message: types.Message, state: FSMContext):
+async def add_bal_finish(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (float(message.text), data['uid']))
-    db.commit()
-    await message.answer("✅ Tayyor.")
+    amount = float(message.text)
+    await users_col.update_one(
+        {'user_id': data['target_id']},
+        {'$inc': {'balance': amount}},
+        upsert=True
+    )
+    await message.answer(f"✅ ID {data['target_id']} hisobiga {amount} so'm qo'shildi!")
+    try:
+        await bot.send_message(data['target_id'], f"💰 Balansingiz {amount} so'mga to'ldirildi!")
+    except: pass
     await state.clear()
 
-@dp.message(F.text == "👤 Profil")
-async def user_prof(message: types.Message):
-    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (message.from_user.id,))
-    res = cursor.fetchone()
-    await message.answer(f"🆔 ID: `{message.from_user.id}`\n💰 Balans: {res[0]} so'm")
-
-@dp.message(F.text == "🏠 Asosiy menyu")
-async def home_back(message: types.Message):
-    await message.answer("Asosiy menyu", reply_markup=main_menu)
+@dp.message(F.text == "💰 Balans to'ldirish")
+async def fill_bal(message: types.Message):
+    text = (
+        f"💳 Karta raqam: `{KARTA_RAQAM}`\n"
+        f"👤 ID: `{message.from_user.id}`\n\n"
+        "To'lov qilganingizdan so'ng, chekni (screenshot) adminga yuboring."
+    )
+    await message.answer(text, reply_markup=payment_kb)
 
 @dp.message(Command("start"))
-async def start_handler(message: types.Message):
-    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (message.from_user.id,))
-    db.commit()
-    await message.answer("Xush kelibsiz!", reply_markup=main_menu)
+async def start_cmd(message: types.Message):
+    await users_col.update_one(
+        {'user_id': message.from_user.id},
+        {'$setOnInsert': {'balance': 0}},
+        upsert=True
+    )
+    await message.answer("Xush kelibsiz! Botdan foydalanish uchun menyuni tanlang.", reply_markup=main_menu)
+
+@dp.message(F.text == "🏠 Asosiy menyu")
+async def back_home(message: types.Message):
+    await message.answer("Asosiy menyu", reply_markup=main_menu)
 
 async def main():
     await dp.start_polling(bot)
