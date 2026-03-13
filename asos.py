@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -8,6 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
+from aiohttp import web  # Web server uchun
 
 # --- KONFIGURATSIYA ---
 TOKEN = "8678413684:AAGTwgkxubtg47-eCSyhwZv2tQR0gvu0iHo"
@@ -26,6 +28,21 @@ services_col = db['services']
 categories_col = db['categories']
 orders_col = db['orders']
 settings_col = db['settings']
+
+# --- KEEP-ALIVE WEB SERVER ---
+async def handle(request):
+    return web.Response(text="Bot is running 24/7!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    # Render avtomatik PORT o'zgaruvchisini beradi, bo'lmasa 8080 ishlatiladi
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logging.info(f"Web server {port}-portda ishga tushdi.")
 
 # --- HOLATLAR ---
 class AdminState(StatesGroup):
@@ -137,11 +154,9 @@ async def buy_step2(message: types.Message, state: FSMContext):
     data = await state.get_data()
     u_id = message.from_user.id
     
-    # Pulni ushlab qolish
     await users_col.update_one({"user_id": u_id}, {"$inc": {"balance": -data['price']}})
     order = await orders_col.insert_one({"u_id": u_id, "name": data['name'], "price": data['price'], "info": message.text, "status": "pending"})
     
-    # Adminga
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Bajarildi", callback_data=f"adm_o_y_{order.inserted_id}"),
          InlineKeyboardButton(text="❌ Rad etish", callback_data=f"adm_o_n_{order.inserted_id}")]
@@ -150,7 +165,6 @@ async def buy_step2(message: types.Message, state: FSMContext):
     await message.answer("✅ Buyurtma berildi, balansdan pul yechildi. Admin tasdiqlashini kiting.", reply_markup=main_kb())
     await state.clear()
 
-# --- ADMIN: BUYURTMA QARORI ---
 @dp.callback_query(F.data.startswith("adm_o_"))
 async def admin_order_res(call: types.CallbackQuery):
     _, _, res, o_id = call.data.split("_")
@@ -158,7 +172,6 @@ async def admin_order_res(call: types.CallbackQuery):
     if res == "y":
         await bot.send_message(order['u_id'], f"✅ Buyurtmangiz ({order['name']}) muvaffaqiyatli bajarildi!")
     else:
-        # Pulni qaytarish
         await users_col.update_one({"user_id": order['u_id']}, {"$inc": {"balance": order['price']}})
         await bot.send_message(order['u_id'], f"❌ Buyurtmangiz ({order['name']}) rad etildi. Pullar hisobingizga qaytarildi.")
     await call.message.delete()
@@ -224,7 +237,7 @@ async def admin_panel(message: types.Message, state: FSMContext):
         await state.clear()
         await message.answer("🛠 Admin panel:", reply_markup=admin_kb())
 
-# --- ADMIN: BO'LIM QO'SHISH VA YANGI XIZMAT BILDIRIShNOMASI ---
+# --- ADMIN: BO'LIM QO'SHISH ---
 @dp.message(F.text == "📂 Bo'lim/Xizmatlar", F.from_user.id == ADMIN_ID)
 async def manage_init(message: types.Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -268,7 +281,6 @@ async def a_serv4(message: types.Message, state: FSMContext):
     price = int(message.text)
     await services_col.insert_one({"category": d['cat'], "name": d['name'], "price": price})
     
-    # BILDIRISHNOMA
     users = await users_col.find().to_list(None)
     for u in users:
         try: await bot.send_message(u['user_id'], f"📣 **YANGI XIZMAT!**\n\n📂 Bo'lim: {d['cat']}\n📦 Nom: {d['name']}\n💰 Narx: {price} so'm")
@@ -277,7 +289,7 @@ async def a_serv4(message: types.Message, state: FSMContext):
     await message.answer("✅ Xizmat qo'shildi va e'lon qilindi.", reply_markup=admin_kb())
     await state.clear()
 
-# --- ADMIN: KARTA VA OBUNA SOZLAMALARI ---
+# --- ADMIN: SOZLAMALAR ---
 @dp.message(F.text == "💳 Karta sozlamalari", F.from_user.id == ADMIN_ID)
 async def card_set(message: types.Message, state: FSMContext):
     await message.answer("Karta: `Nomi:Raqami` (Humo:9860...)")
@@ -302,7 +314,7 @@ async def sub_save(message: types.Message, state: FSMContext):
     await message.answer("✅ Kanal qo'shildi.", reply_markup=admin_kb())
     await state.clear()
 
-# --- FOYDALANUVCHI: STATISTIKA ---
+# --- STATISTIKA ---
 @dp.message(F.text == "📊 Statistika")
 async def user_stat(message: types.Message):
     today = datetime.now().strftime("%Y-%m-%d")
@@ -312,7 +324,6 @@ async def user_stat(message: types.Message):
     user = await users_col.find_one({"user_id": message.from_user.id})
     await message.answer(f"📊 **Statistika**\n\n👤 Bugun faol: {t_count}\n📅 Shu oyda faol: {m_count}\n💰 Siz kiritgan summa: {user['total_in']} so'm")
 
-# --- ADMIN: STATISTIKA ---
 @dp.message(F.text == "📊 Admin Statistika", F.from_user.id == ADMIN_ID)
 async def admin_stat(message: types.Message):
     total = await users_col.count_documents({})
@@ -339,9 +350,20 @@ async def back_home(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Bosh menyu:", reply_markup=main_kb())
 
+# --- ASOSIY MAIN FUNKSIYA ---
 async def main():
+    # 1. Web serverni ishga tushirish (Render uchun)
+    asyncio.create_task(start_web_server())
+    
+    # 2. Eskirgan update'larni tozalash (bot o'chiqligida kelgan xabarlar botni qotirmasligi uchun)
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # 3. Pollingni boshlash
+    logging.info("Bot ishga tushdi...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
-
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Bot to'xtatildi.")
