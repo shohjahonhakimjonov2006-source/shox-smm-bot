@@ -9,7 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
-from aiohttp import web  # Web server uchun
+from aiohttp import web
 
 # --- KONFIGURATSIYA ---
 TOKEN = "8678413684:AAGTwgkxubtg47-eCSyhwZv2tQR0gvu0iHo"
@@ -38,7 +38,6 @@ async def start_web_server():
     app.router.add_get("/", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    # Render avtomatik PORT o'zgaruvchisini beradi, bo'lmasa 8080 ishlatiladi
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
@@ -52,6 +51,9 @@ class AdminState(StatesGroup):
     edit_card = State()
     add_channel = State()
     send_news = State()
+    # Yangi holatlar
+    edit_cat_new_name = State()
+    edit_serv_new_price = State()
 
 class UserState(StatesGroup):
     order_data = State()
@@ -237,12 +239,13 @@ async def admin_panel(message: types.Message, state: FSMContext):
         await state.clear()
         await message.answer("🛠 Admin panel:", reply_markup=admin_kb())
 
-# --- ADMIN: BO'LIM QO'SHISH ---
+# --- ADMIN: BO'LIM QO'SHISH VA BOSHQARISH ---
 @dp.message(F.text == "📂 Bo'lim/Xizmatlar", F.from_user.id == ADMIN_ID)
 async def manage_init(message: types.Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Bo'lim qo'shish", callback_data="a_add_cat")],
-        [InlineKeyboardButton(text="➕ Xizmat qo'shish", callback_data="a_add_serv")]
+        [InlineKeyboardButton(text="➕ Xizmat qo'shish", callback_data="a_add_serv")],
+        [InlineKeyboardButton(text="⚙️ Bo'lim/Xizmatlarni boshqarish", callback_data="a_manage_all")]
     ])
     await message.answer("Tanlang:", reply_markup=kb)
 
@@ -278,15 +281,95 @@ async def a_serv3(message: types.Message, state: FSMContext):
 @dp.message(AdminState.add_serv_price)
 async def a_serv4(message: types.Message, state: FSMContext):
     d = await state.get_data()
-    price = int(message.text)
-    await services_col.insert_one({"category": d['cat'], "name": d['name'], "price": price})
-    
-    users = await users_col.find().to_list(None)
-    for u in users:
-        try: await bot.send_message(u['user_id'], f"📣 **YANGI XIZMAT!**\n\n📂 Bo'lim: {d['cat']}\n📦 Nom: {d['name']}\n💰 Narx: {price} so'm")
-        except: continue
-    
-    await message.answer("✅ Xizmat qo'shildi va e'lon qilindi.", reply_markup=admin_kb())
+    try:
+        price = int(message.text)
+        await services_col.insert_one({"category": d['cat'], "name": d['name'], "price": price})
+        users = await users_col.find().to_list(None)
+        for u in users:
+            try: await bot.send_message(u['user_id'], f"📣 **YANGI XIZMAT!**\n\n📂 Bo'lim: {d['cat']}\n📦 Nom: {d['name']}\n💰 Narx: {price} so'm")
+            except: continue
+        await message.answer("✅ Xizmat qo'shildi va e'lon qilindi.", reply_markup=admin_kb())
+        await state.clear()
+    except:
+        await message.answer("Narxni faqat raqamda kiriting!")
+
+# --- ADMIN: TAHRIRLASH VA O'CHIRISH (YANGI) ---
+@dp.callback_query(F.data == "a_manage_all")
+async def manage_all(call: types.CallbackQuery):
+    cats = await categories_col.find().to_list(100)
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+    for c in cats:
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(text=f"📁 {c['name']}", callback_data=f"manage_cat_{c['_id']}"),
+            InlineKeyboardButton(text="✏️", callback_data=f"edit_cat_{c['_id']}"),
+            InlineKeyboardButton(text="❌", callback_data=f"del_cat_{c['_id']}")
+        ])
+    await call.message.edit_text("Tahrirlash yoki o'chirish uchun bo'limni tanlang:", reply_markup=kb)
+
+# Bo'limni o'chirish
+@dp.callback_query(F.data.startswith("del_cat_"))
+async def delete_category(call: types.CallbackQuery):
+    c_id = call.data.split("_")[2]
+    cat = await categories_col.find_one({"_id": ObjectId(c_id)})
+    if cat:
+        await services_col.delete_many({"category": cat['name']}) # Ichidagi xizmatlarni ham o'chirish
+        await categories_col.delete_one({"_id": ObjectId(c_id)})
+        await call.answer("Bo'lim va uning xizmatlari o'chirildi", show_alert=True)
+        await manage_all(call)
+
+# Bo'limni tahrirlash
+@dp.callback_query(F.data.startswith("edit_cat_"))
+async def edit_category(call: types.CallbackQuery, state: FSMContext):
+    await state.update_data(c_id=call.data.split("_")[2])
+    await call.message.answer("Bo'lim uchun yangi nom kiriting:")
+    await state.set_state(AdminState.edit_cat_new_name)
+
+@dp.message(AdminState.edit_cat_new_name)
+async def edit_cat_save(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    old_cat = await categories_col.find_one({"_id": ObjectId(data['c_id'])})
+    await services_col.update_many({"category": old_cat['name']}, {"$set": {"category": message.text}})
+    await categories_col.update_one({"_id": ObjectId(data['c_id'])}, {"$set": {"name": message.text}})
+    await message.answer("✅ Bo'lim nomi yangilandi.", reply_markup=admin_kb())
+    await state.clear()
+
+# Xizmatlarni boshqarish (bo'lim ichida)
+@dp.callback_query(F.data.startswith("manage_cat_"))
+async def manage_services_in_cat(call: types.CallbackQuery):
+    c_id = call.data.split("_")[2]
+    cat = await categories_col.find_one({"_id": ObjectId(c_id)})
+    servs = await services_col.find({"category": cat['name']}).to_list(100)
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+    for s in servs:
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(text=f"📦 {s['name']} ({s['price']})", callback_data="none"),
+            InlineKeyboardButton(text="💰 ✏️", callback_data=f"edit_serv_{s['_id']}"),
+            InlineKeyboardButton(text="❌", callback_data=f"del_serv_{s['_id']}")
+        ])
+    kb.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="a_manage_all")])
+    await call.message.edit_text(f"{cat['name']} bo'limidagi xizmatlar:", reply_markup=kb)
+
+# Xizmatni o'chirish
+@dp.callback_query(F.data.startswith("del_serv_"))
+async def delete_service(call: types.CallbackQuery):
+    s_id = call.data.split("_")[2]
+    await services_col.delete_one({"_id": ObjectId(s_id)})
+    await call.answer("Xizmat o'chirildi")
+    await manage_all(call)
+
+# Xizmat narxini tahrirlash
+@dp.callback_query(F.data.startswith("edit_serv_"))
+async def edit_service(call: types.CallbackQuery, state: FSMContext):
+    await state.update_data(s_id=call.data.split("_")[2])
+    await call.message.answer("Xizmat uchun yangi narx kiriting:")
+    await state.set_state(AdminState.edit_serv_new_price)
+
+@dp.message(AdminState.edit_serv_new_price)
+async def edit_serv_save(message: types.Message, state: FSMContext):
+    if not message.text.isdigit(): return await message.answer("Faqat raqam kiriting!")
+    data = await state.get_data()
+    await services_col.update_one({"_id": ObjectId(data['s_id'])}, {"$set": {"price": int(message.text)}})
+    await message.answer("✅ Xizmat narxi yangilandi.", reply_markup=admin_kb())
     await state.clear()
 
 # --- ADMIN: SOZLAMALAR ---
@@ -297,10 +380,13 @@ async def card_set(message: types.Message, state: FSMContext):
 
 @dp.message(AdminState.edit_card)
 async def card_save(message: types.Message, state: FSMContext):
-    name, num = message.text.split(":")
-    await settings_col.update_one({"type": "card", "name": name}, {"$set": {"number": num}}, upsert=True)
-    await message.answer("✅ Karta saqlandi.", reply_markup=admin_kb())
-    await state.clear()
+    try:
+        name, num = message.text.split(":")
+        await settings_col.update_one({"type": "card", "name": name}, {"$set": {"number": num}}, upsert=True)
+        await message.answer("✅ Karta saqlandi.", reply_markup=admin_kb())
+        await state.clear()
+    except:
+        await message.answer("Xato format! Nomi:Raqami ko'rinishida yozing.")
 
 @dp.message(F.text == "📢 Majburiy obuna", F.from_user.id == ADMIN_ID)
 async def sub_set(message: types.Message, state: FSMContext):
@@ -309,10 +395,13 @@ async def sub_set(message: types.Message, state: FSMContext):
 
 @dp.message(AdminState.add_channel)
 async def sub_save(message: types.Message, state: FSMContext):
-    name, cid, link = message.text.split("|")
-    await settings_col.insert_one({"type": "channel", "name": name, "chat_id": int(cid), "link": link})
-    await message.answer("✅ Kanal qo'shildi.", reply_markup=admin_kb())
-    await state.clear()
+    try:
+        name, cid, link = message.text.split("|")
+        await settings_col.insert_one({"type": "channel", "name": name, "chat_id": int(cid), "link": link})
+        await message.answer("✅ Kanal qo'shildi.", reply_markup=admin_kb())
+        await state.clear()
+    except:
+        await message.answer("Xato format! Nomi|ID|Link ko'rinishida yozing.")
 
 # --- STATISTIKA ---
 @dp.message(F.text == "📊 Statistika")
@@ -322,7 +411,7 @@ async def user_stat(message: types.Message):
     t_count = await users_col.count_documents({"last_seen": today})
     m_count = await users_col.count_documents({"month": month})
     user = await users_col.find_one({"user_id": message.from_user.id})
-    await message.answer(f"📊 **Statistika**\n\n👤 Bugun faol: {t_count}\n📅 Shu oyda faol: {m_count}\n💰 Siz kiritgan summa: {user['total_in']} so'm")
+    await message.answer(f"📊 **Statistika**\n\n👤 Bugun faol: {t_count}\n📅 Shu oyda faol: {m_count}\n💰 Siz kiritgan summa: {user['total_in'] if user else 0} so'm")
 
 @dp.message(F.text == "📊 Admin Statistika", F.from_user.id == ADMIN_ID)
 async def admin_stat(message: types.Message):
@@ -352,13 +441,8 @@ async def back_home(message: types.Message, state: FSMContext):
 
 # --- ASOSIY MAIN FUNKSIYA ---
 async def main():
-    # 1. Web serverni ishga tushirish (Render uchun)
     asyncio.create_task(start_web_server())
-    
-    # 2. Eskirgan update'larni tozalash (bot o'chiqligida kelgan xabarlar botni qotirmasligi uchun)
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    # 3. Pollingni boshlash
     logging.info("Bot ishga tushdi...")
     await dp.start_polling(bot)
 
