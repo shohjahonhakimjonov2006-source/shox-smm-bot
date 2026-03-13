@@ -7,6 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
 
 # --- KONFIGURATSIYA ---
 TOKEN = "8473159649:AAHt9KnDd0aRDvthXrIE1sRWhP2u7DHpCnM"
@@ -29,6 +30,7 @@ class AdminState(StatesGroup):
     add_category = State()
     add_service_name = State()
     add_service_price = State()
+    sending_news = State()
 
 class UserOrder(StatesGroup):
     entering_details = State()
@@ -51,136 +53,156 @@ def admin_menu_kb():
         [KeyboardButton(text="🏠 Bosh menyu")]
     ], resize_keyboard=True)
 
-# --- /ADMIN BUYRUG'I (XAR QANDAY HOLATDA ISHLAYDI) ---
+# --- NAVIGATSIYA VA ADMIN PANEL ---
 @dp.message(Command("admin"))
-async def admin_panel_force(message: types.Message, state: FSMContext):
+async def admin_panel(message: types.Message, state: FSMContext):
     if message.from_user.id == ADMIN_ID:
-        await state.clear() # Barcha bloklangan holatlarni yuvib tashlaydi
-        await message.answer("🛠 **Admin Panelga majburiy kirish**\nBarcha holatlar tozalandi.", reply_markup=admin_menu_kb())
+        await state.clear()
+        await message.answer("🛠 Admin panelga xush kelibsiz!", reply_markup=admin_menu_kb())
 
 @dp.message(F.text == "🏠 Bosh menyu")
-@dp.message(F.text == "⬅️ Ortga qaytish")
-async def universal_back(message: types.Message, state: FSMContext):
+async def go_main_home(message: types.Message, state: FSMContext):
     await state.clear()
-    if message.from_user.id == ADMIN_ID:
-        await message.answer("Admin panelga qaytdingiz:", reply_markup=admin_menu_kb())
-    else:
-        await message.answer("Asosiy menyuga qaytdingiz:", reply_markup=main_menu())
+    await message.answer("Siz asosiy foydalanuvchi menyusiga qaytdingiz.", reply_markup=main_menu())
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message, state: FSMContext):
     await state.clear()
     u_id = message.from_user.id
-    now = datetime.now()
     await users_col.update_one(
         {"user_id": u_id},
-        {"$set": {"last_seen": now.strftime("%Y-%m-%d"), "month": now.strftime("%Y-%m")},
-         "$setOnInsert": {"balance": 0, "join_date": now.strftime("%Y-%m-%d")}},
+        {"$set": {"last_seen": datetime.now().strftime("%Y-%m-%d")},
+         "$setOnInsert": {"balance": 0, "join_date": datetime.now().strftime("%Y-%m-%d")}},
         upsert=True
     )
-    if u_id == ADMIN_ID:
-        await message.answer("🛠 Admin panel:", reply_markup=admin_menu_kb())
-    else:
-        await message.answer("Xush kelibsiz!", reply_markup=main_menu())
+    await message.answer("Assalomu alaykum! Kerakli bo'limni tanlang:", reply_markup=main_menu())
 
-# --- KARTANI O'ZGARTIRISH ---
-@dp.message(F.text == "💳 Kartani o'zgartirish", F.from_user.id == ADMIN_ID)
-async def card_start(message: types.Message, state: FSMContext):
+# --- ADMIN: YANGILIK YUBORISH (TUZATILDI) ---
+@dp.message(F.text == "📢 Yangilik yuborish", F.from_user.id == ADMIN_ID)
+async def news_start(message: types.Message, state: FSMContext):
+    await message.answer("Barcha foydalanuvchilarga yuboriladigan xabar matnini kiriting:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🏠 Bosh menyu")]], resize_keyboard=True))
+    await state.set_state(AdminState.sending_news)
+
+@dp.message(AdminState.sending_news)
+async def news_send(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Bosh menyu": return await go_main_home(message, state)
+    users = await users_col.find().to_list(None)
+    count = 0
+    for u in users:
+        try:
+            await bot.send_message(u['user_id'], message.text)
+            count += 1
+            await asyncio.sleep(0.05)
+        except: continue
+    await message.answer(f"✅ Xabar {count} ta foydalanuvchiga yuborildi.", reply_markup=admin_menu_kb())
     await state.clear()
-    await message.answer("Yangi karta raqamini yozing:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Ortga qaytish")]], resize_keyboard=True))
-    await state.set_state(AdminState.changing_card)
 
-@dp.message(AdminState.changing_card)
-async def card_save(message: types.Message, state: FSMContext):
-    if message.text == "⬅️ Ortga qaytish": return await universal_back(message, state)
-    await settings_col.update_one({"type": "card_info"}, {"$set": {"card": message.text}}, upsert=True)
-    await message.answer(f"✅ Karta yangilandi: {message.text}", reply_markup=admin_menu_kb())
-    await state.clear()
-
-# --- ADMIN STATISTIKA ---
-@dp.message(F.text == "📈 Admin Statistika", F.from_user.id == ADMIN_ID)
-async def full_stats(message: types.Message):
-    total = await users_col.count_documents({})
-    today = await users_col.count_documents({"last_seen": datetime.now().strftime("%Y-%m-%d")})
-    s = await settings_col.find_one({"type": "stats"})
-    inflow = s.get("total_inflow", 0) if s else 0
-    await message.answer(f"📊 **Statistika**\n\n👤 Jami: {total}\n🆕 Bugun faol: {today}\n💰 Jami tushum: {inflow:,} so'm")
-
-# --- XIZMAT QO'SHISH (ESKILARI QOLADI) ---
-@dp.message(F.text == "📁 Bo'limlar/Xizmatlar", F.from_user.id == ADMIN_ID)
-async def cats_view(message: types.Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Bo'lim qo'shish", callback_data="add_c")],
-        [InlineKeyboardButton(text="➕ Xizmat qo'shish", callback_data="add_s")]
-    ])
-    cats = await categories_col.find().to_list(100)
-    res = "\n".join([f"• {c['name']}" for c in cats]) if cats else "Hali bo'lim yo'q"
-    await message.answer(f"📂 **Bo'limlar:**\n{res}", reply_markup=kb)
-
-@dp.callback_query(F.data == "add_s")
-async def s_add_1(call: types.CallbackQuery, state: FSMContext):
-    cats = await categories_col.find().to_list(100)
-    if not cats: return await call.answer("Avval bo'lim oching!", show_alert=True)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=c['name'], callback_data=f"scat_{c['name']}")] for c in cats])
-    await call.message.answer("Qaysi bo'limga?", reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("scat_"))
-async def s_add_2(call: types.CallbackQuery, state: FSMContext):
-    await state.update_data(cat=call.data.split("_")[1])
-    await call.message.answer("Yangi xizmat nomi?")
-    await state.set_state(AdminState.add_service_name)
-
-@dp.message(AdminState.add_service_name)
-async def s_add_3(message: types.Message, state: FSMContext):
-    await state.update_data(name=message.text)
-    await message.answer("Narxi (raqamda)?")
-    await state.set_state(AdminState.add_service_price)
-
+# --- ADMIN: XIZMAT QO'SHISH VA BILDIRISHNOMA ---
 @dp.message(AdminState.add_service_price)
-async def s_add_4(message: types.Message, state: FSMContext):
-    if not message.text.isdigit(): return await message.answer("Raqam yozing!")
-    d = await state.get_data()
-    await services_col.insert_one({"category": d['cat'], "name": d['name'], "price": int(message.text)})
-    await message.answer("✅ Yangi xizmat qo'shildi!", reply_markup=admin_menu_kb())
+async def s_add_final(message: types.Message, state: FSMContext):
+    if not message.text.isdigit(): return await message.answer("Faqat raqam yozing!")
+    data = await state.get_data()
+    price = int(message.text)
+    await services_col.insert_one({"category": data['cat'], "name": data['name'], "price": price})
+    
+    # Foydalanuvchilarga bildirishnoma
+    promo_text = (
+        f"📣 **YANGI XIZMAT QO'SHILDI!**\n\n"
+        f"📂 Bo'lim: {data['cat']}\n"
+        f"📦 Xizmat: {data['name']}\n"
+        f"💰 Narxi: {price:,} so'm\n\n"
+        f"Hoziroq botga kiring va yangi xizmatdan foydalaning! 👇"
+    )
+    users = await users_col.find().to_list(None)
+    for u in users:
+        try: await bot.send_message(u['user_id'], promo_text, parse_mode="Markdown")
+        except: continue
+
+    await message.answer("✅ Xizmat qo'shildi va barchaga e'lon qilindi.", reply_markup=admin_menu_kb())
     await state.clear()
 
-# --- TO'LOV TASDIQLASH (FIXED) ---
-@dp.message(F.text == "💳 Hisobni to'ldirish")
-async def pay_init(message: types.Message, state: FSMContext):
-    c = await settings_col.find_one({"type": "card_info"})
-    card = c['card'] if c else "8600..."
-    await message.answer(f"Karta: `{card}`\nChek yuboring:", parse_mode="Markdown")
-    await state.set_state(PaymentState.sending_receipt)
+# --- BUYURTMA BERISH VA PUL YECHISH ---
+@dp.callback_query(F.data.startswith("ubuy_"))
+async def user_order_details(call: types.CallbackQuery, state: FSMContext):
+    s_id = call.data.split("_")[1]
+    service = await services_col.find_one({"_id": ObjectId(s_id)})
+    user = await users_col.find_one({"user_id": call.from_user.id})
 
-@dp.message(PaymentState.sending_receipt, F.photo)
-async def pay_photo(message: types.Message, state: FSMContext):
-    await state.update_data(p_id=message.photo[-1].file_id)
-    await message.answer("Summa?")
-    await state.set_state(PaymentState.entering_amount)
+    if user['balance'] < service['price']:
+        return await call.answer("❌ Balansingizda yetarli mablag' yo'q!", show_alert=True)
 
-@dp.message(PaymentState.entering_amount)
-async def pay_final(message: types.Message, state: FSMContext):
-    if not message.text.isdigit(): return await message.answer("Raqam yozing!")
-    d = await state.get_data()
+    await state.update_data(s_id=s_id, s_name=service['name'], s_price=service['price'], s_cat=service['category'])
+    await call.message.answer(f"📝 {service['name']} uchun ma'lumotlarni kiriting (Link yoki PUBG ID):", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🏠 Bosh menyu")]], resize_keyboard=True))
+    await state.set_state(UserOrder.entering_details)
+
+@dp.message(UserOrder.entering_details)
+async def user_order_finish(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Bosh menyu": return await go_main_home(message, state)
+    data = await state.get_data()
+    u_id = message.from_user.id
+    
+    # Pulni vaqtincha yechish
+    await users_col.update_one({"user_id": u_id}, {"$inc": {"balance": -data['s_price']}})
+    
+    order_count = await orders_col.count_documents({}) + 1
+    order_res = await orders_col.insert_one({
+        "u_id": u_id, "price": data['s_price'], "status": "pending", "details": message.text
+    })
+
+    # Adminga xabar
+    admin_text = (
+        f"📦 **YANGI BUYURTMA #{order_count}**\n\n"
+        f"👤 Foydalanuvchi ID: `{u_id}`\n"
+        f"📂 Bo'lim: {data['s_cat']}\n"
+        f"🛠 Xizmat turi: {data['s_name']}\n"
+        f"🔗 Ma'lumot/ID: `{message.text}`\n"
+        f"💰 Narxi: {data['s_price']:,} so'm"
+    )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Tasdiq", callback_data=f"ap_y_{message.from_user.id}_{message.text}")],
-        [InlineKeyboardButton(text="❌ Rad", callback_data=f"ap_n_{message.from_user.id}")]
+        [InlineKeyboardButton(text="✅ Bajarildi", callback_data=f"ord_done_{order_res.inserted_id}_{u_id}")],
+        [InlineKeyboardButton(text="❌ Rad etish (Pulni qaytarish)", callback_data=f"ord_cancel_{order_res.inserted_id}_{u_id}")]
     ])
-    await bot.send_photo(ADMIN_ID, d['p_id'], caption=f"To'lov: {message.text}\nID: {message.from_user.id}", reply_markup=kb)
-    await message.answer("Yuborildi!", reply_markup=main_menu())
+    
+    await bot.send_message(ADMIN_ID, admin_text, reply_markup=kb, parse_mode="Markdown")
+    await message.answer("✅ Buyurtma qabul qilindi! Admin ko'rib chiqqach sizga xabar boradi.", reply_markup=main_menu())
     await state.clear()
 
-@dp.callback_query(F.data.startswith("ap_"))
-async def admin_decision(call: types.CallbackQuery):
-    p = call.data.split("_")
-    u_id = int(p[3])
-    if p[2] == "y":
-        amt = int(p[4])
+# --- ADMIN: BUYURTMANI TASDIQLASH/RAD ETISH ---
+@dp.callback_query(F.data.startswith("ord_"))
+async def admin_order_decision(call: types.CallbackQuery):
+    _, action, o_id, u_id = call.data.split("_")
+    order = await orders_col.find_one({"_id": ObjectId(o_id)})
+    if not order: return await call.answer("Buyurtma topilmadi!")
+
+    if action == "done":
+        await orders_col.update_one({"_id": ObjectId(o_id)}, {"$set": {"status": "completed"}})
+        await bot.send_message(int(u_id), f"✅ Buyurtmangiz bajarildi! Xizmat: {order.get('name', 'Tanlangan xizmat')}")
+        await call.message.edit_caption(caption=call.message.text + "\n\n✅ **BAJARILDI**") if call.message.photo else await call.message.edit_text(call.message.text + "\n\n✅ **BAJARILDI**")
+    
+    elif action == "cancel":
+        # Pulni qaytarish
+        await users_col.update_one({"user_id": int(u_id)}, {"$inc": {"balance": order['price']}})
+        await orders_col.update_one({"_id": ObjectId(o_id)}, {"$set": {"status": "cancelled"}})
+        await bot.send_message(int(u_id), f"❌ Buyurtmangiz rad etildi. {order['price']:,} so'm hisobingizga qaytarildi.")
+        await call.message.edit_text(call.message.text + "\n\n❌ **RAD ETILDI (PUL QAYTARILDI)**")
+
+    await call.message.edit_reply_markup(reply_markup=None)
+
+# --- TO'LOVNI TASDIQLASH (FIXED) ---
+@dp.callback_query(F.data.startswith("adm_p_"))
+async def approve_payment(call: types.CallbackQuery):
+    parts = call.data.split("_")
+    status, u_id, amt = parts[2], int(parts[3]), int(parts[4]) if len(parts)>4 else 0
+    
+    if status == "y":
         await users_col.update_one({"user_id": u_id}, {"$inc": {"balance": amt}})
         await settings_col.update_one({"type": "stats"}, {"$inc": {"total_inflow": amt}}, upsert=True)
-        await bot.send_message(u_id, f"✅ Hisobingiz {amt} so'mga to'ldirildi!")
+        await bot.send_message(u_id, f"✅ To'lovingiz tasdiqlandi! Hisobingiz {amt:,} so'mga to'ldirildi.")
+        await call.answer("Tasdiqlandi", show_alert=True)
     else:
-        await bot.send_message(u_id, "❌ To'lov rad etildi.")
+        await bot.send_message(u_id, "❌ To'lovingiz rad etildi. Chekda xatolik bor.")
+        await call.answer("Rad etildi", show_alert=True)
+    
     await call.message.edit_reply_markup(reply_markup=None)
 
 # --- RUN ---
