@@ -10,7 +10,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 
 # --- KONFIGURATSIYA ---
-TOKEN = "8473159649:AAHt9KnDd0aRDvthXrIE1sRWhP2u7DHpCnM"
+TOKEN = "8678413684:AAGTwgkxubtg47-eCSyhwZv2tQR0gvu0iHo"
 ADMIN_ID = 7861165622
 MONGO_URL = "mongodb+srv://Zoirbek2003:Zoirbek2003@zoirbek2003.paka8jf.mongodb.net/?appName=ZOirbek2003"
 
@@ -344,3 +344,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
