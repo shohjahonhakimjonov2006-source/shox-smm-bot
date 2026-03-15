@@ -14,10 +14,10 @@ from bson import ObjectId
 from aiohttp import web
 
 
-TOKEN = "BOT_TOKEN"
-ADMIN_ID = 000000000
+TOKEN = "8678413684:AAGTwgkxubtg47-eCSyhwZv2tQR0gvu0iHo"
+ADMIN_ID = 7861165622
 
-MONGO_URL = "mongodb_url"
+MONGO_URL = "mongodb+srv://Zoirbek2003:Zoirbek2003@zoirbek2003.paka8jf.mongodb.net/?appName=ZOirbek2003"
 
 
 logging.basicConfig(level=logging.INFO)
@@ -286,3 +286,203 @@ async def main():
 if __name__ == "__main__":
 
     asyncio.run(main())
+@dp.callback_query(F.data.startswith("ord_ok_"))
+async def order_accept(call: types.CallbackQuery):
+
+    order_id = call.data.split("_")[2]
+
+    order = await orders_col.find_one({"_id": ObjectId(order_id)})
+
+    await orders_col.update_one(
+        {"_id": ObjectId(order_id)},
+        {"$set": {"status": "completed"}}
+    )
+
+    await bot.send_message(
+        order["user_id"],
+        f"✅ Buyurtmangiz bajarildi\n\nXizmat: {order['service']}"
+    )
+
+    await call.message.edit_text("Buyurtma bajarildi")
+@dp.callback_query(F.data.startswith("ord_no_"))
+async def order_cancel(call: types.CallbackQuery):
+
+    order_id = call.data.split("_")[2]
+
+    order = await orders_col.find_one({"_id": ObjectId(order_id)})
+
+    await users_col.update_one(
+        {"user_id": order["user_id"]},
+        {"$inc": {"balance": order["price"]}}
+    )
+
+    await orders_col.update_one(
+        {"_id": ObjectId(order_id)},
+        {"$set": {"status": "canceled"}}
+    )
+
+    await bot.send_message(
+        order["user_id"],
+        "❌ Buyurtmangiz rad etildi\nPul balansingizga qaytarildi"
+    )
+
+    await call.message.edit_text("Buyurtma rad etildi")
+@dp.message(F.text == "💳 Hisobni to'ldirish")
+async def deposit_start(message: types.Message):
+
+    cards = await settings_col.find({"type": "card"}).to_list(None)
+
+    text = "To'lov uchun kartalar\n\n"
+
+    for c in cards:
+
+        text += f"{c['name']}\n{c['number']}\n\n"
+
+    text += "Chek rasmini yuboring"
+
+    await message.answer(text)
+@dp.message(F.photo)
+async def payment_photo(message: types.Message, state: FSMContext):
+
+    await state.update_data(photo=message.photo[-1].file_id)
+
+    await message.answer("To'lov summasini yozing")
+
+    await state.set_state(UserState.pay_sum)
+9@dp.message(UserState.pay_sum)
+async def payment_sum(message: types.Message, state: FSMContext):
+
+    data = await state.get_data()
+
+    payment = await payments_col.insert_one({
+        "user_id": message.from_user.id,
+        "sum": int(message.text),
+        "photo": data["photo"],
+        "status": "pending"
+    })
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="Tasdiqlash",
+                callback_data=f"pay_ok_{payment.inserted_id}"
+            )
+        ]]
+    )
+
+    await bot.send_photo(
+        ADMIN_ID,
+        data["photo"],
+        caption=f"To'lov\nUser: {message.from_user.id}\nSumma: {message.text}",
+        reply_markup=kb
+    )
+
+    await message.answer("Chek adminga yuborildi")
+
+    await state.clear()
+@dp.callback_query(F.data.startswith("pay_ok_"))
+async def payment_accept(call: types.CallbackQuery):
+
+    pay_id = call.data.split("_")[2]
+
+    pay = await payments_col.find_one({"_id": ObjectId(pay_id)})
+
+    await users_col.update_one(
+        {"user_id": pay["user_id"]},
+        {
+            "$inc": {
+                "balance": pay["sum"],
+                "total_in": pay["sum"]
+            }
+        }
+    )
+
+    await payments_col.update_one(
+        {"_id": ObjectId(pay_id)},
+        {"$set": {"status": "done"}}
+    )
+
+    await bot.send_message(
+        pay["user_id"],
+        f"💰 Hisobingiz {pay['sum']} so'mga to'ldirildi"
+    )
+
+    await call.message.edit_caption("To'lov tasdiqlandi")
+@dp.message(F.text == "👤 Balans tahrirlash")
+async def edit_balance_start(message: types.Message, state: FSMContext):
+
+    await message.answer("User ID yuboring")
+
+    await state.set_state(AdminState.edit_user_id)
+
+
+@dp.message(AdminState.edit_user_id)
+async def edit_balance_id(message: types.Message, state: FSMContext):
+
+    await state.update_data(user_id=int(message.text))
+
+    await message.answer("Qo'shiladigan yoki ayriladigan summa")
+
+    await state.set_state(AdminState.edit_user_balance)
+
+
+@dp.message(AdminState.edit_user_balance)
+async def edit_balance_finish(message: types.Message, state: FSMContext):
+
+    data = await state.get_data()
+
+    await users_col.update_one(
+        {"user_id": data["user_id"]},
+        {"$inc": {"balance": int(message.text)}}
+    )
+
+    await message.answer("Balans o'zgartirildi")
+
+    await state.clear()
+@dp.message(F.text == "📢 Xabar yuborish")
+async def broadcast_start(message: types.Message, state: FSMContext):
+
+    await message.answer("Yuboriladigan xabarni yozing")
+
+    await state.set_state(AdminState.broadcast_msg)
+
+
+@dp.message(AdminState.broadcast_msg)
+async def broadcast_send(message: types.Message, state: FSMContext):
+
+    users = await users_col.find().to_list(None)
+
+    for u in users:
+
+        try:
+            await bot.send_message(u["user_id"], message.text)
+        except:
+            pass
+
+    await message.answer("Xabar yuborildi")
+
+    await state.clear()
+@dp.message(F.text == "🎁 Bonuslar")
+async def daily_bonus(message: types.Message):
+
+    user = await users_col.find_one({"user_id": message.from_user.id})
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    if user.get("last_daily") == today:
+
+        await message.answer("Bugungi bonusni oldingiz")
+
+        return
+
+    bonus = 1000
+
+    await users_col.update_one(
+        {"user_id": message.from_user.id},
+        {
+            "$inc": {"balance": bonus},
+            "$set": {"last_daily": today}
+        }
+    )
+
+    await message.answer(f"Siz {bonus} so'm bonus oldingiz")
