@@ -15,7 +15,7 @@ from bson import ObjectId
 from aiohttp import web
 
 # --- KONFIGURATSIYA ---
-TOKEN = "8678413684:AAGTwgkxubtg47-eCSyhwZv2tQR0gvu0iHo"
+TOKEN = "8678413684:AAGlG1FRn8l960oCDKRrnKigcuUxi0nwEhM"
 ADMIN_ID = 7861165622
 MONGO_URL = "mongodb+srv://Zoirbek2003:Zoirbek2003@zoirbek2003.paka8jf.mongodb.net/?appName=ZOirbek2003"
 
