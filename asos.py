@@ -41,23 +41,17 @@ async def start_web_server():
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    logging.info(f"Web server {port}-portda ishga tushdi.")
 
 # --- HOLATLAR ---
 class AdminState(StatesGroup):
     add_cat = State()
     add_serv_name = State()
     add_serv_price = State()
-    edit_card = State()
-    add_channel = State()
-    send_news = State()
-    edit_cat_new_name = State()
-    edit_serv_new_price = State()
     edit_user_balance = State()
 
 class UserState(StatesGroup):
     order_data = State()
-    confirm_order = State() # Buyurtmani tasdiqlash uchun
+    confirm_order = State()
     pay_photo = State()
     pay_sum = State()
     help_msg = State()
@@ -73,26 +67,24 @@ def main_kb():
 def admin_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="📂 Bo'lim/Xizmatlar"), KeyboardButton(text="📊 Admin Statistika")],
-        [KeyboardButton(text="📢 Xabar yuborish"), KeyboardButton(text="💳 Karta sozlamalari")],
-        [KeyboardButton(text="📢 Majburiy obuna"), KeyboardButton(text="🏠 Bosh menyu")]
+        [KeyboardButton(text="🏠 Bosh menyu")]
     ], resize_keyboard=True)
 
-# --- START VA OBUNA ---
+# --- START ---
 @dp.message(Command("start"))
 async def start_handler(message: types.Message, state: FSMContext):
     await state.clear()
     u_id = message.from_user.id
     now = datetime.now()
-    
     await users_col.update_one(
         {"user_id": u_id},
-        {"$set": {"last_seen": now.strftime("%Y-%m-%d"), "month": now.strftime("%Y-%m")},
-         "$setOnInsert": {"balance": 0, "total_in": 0, "join_date": now.strftime("%Y-%m-%d")}},
+        {"$set": {"last_seen": now.strftime("%Y-%m-%d")},
+         "$setOnInsert": {"balance": 0, "total_in": 0}},
         upsert=True
     )
     await message.answer("Xush kelibsiz! Kerakli bo'limni tanlang:", reply_markup=main_kb())
 
-# --- FOYDALANUVCHI: XIZMAT VA BUYURTMA ---
+# --- XIZMATLAR VA BUYURTMA ---
 @dp.message(F.text == "🛒 Xizmatlar")
 async def user_cats(message: types.Message):
     cats = await categories_col.find().to_list(100)
@@ -105,7 +97,7 @@ async def user_servs(call: types.CallbackQuery):
     cat = call.data.split("_")[1]
     servs = await services_col.find({"category": cat}).to_list(100)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{s['name']} - {s['price']} so'm", callback_data=f"ubuy_{s['_id']}")] for s in servs])
-    await call.message.edit_text(f"{cat} bo'limi xizmatlari:", reply_markup=kb)
+    await call.message.edit_text(f"{cat} bo'limi:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("ubuy_"))
 async def buy_step1(call: types.CallbackQuery, state: FSMContext):
@@ -117,31 +109,30 @@ async def buy_step1(call: types.CallbackQuery, state: FSMContext):
         return await call.answer("❌ Balansda mablag' yetarli emas!", show_alert=True)
     
     await state.update_data(s_id=s_id, price=serv['price'], name=serv['name'])
-    await call.message.answer(f"📦 {serv['name']} uchun havolani (link) yuboring:", 
+    await call.message.answer(f"📦 {serv['name']} uchun havolani (link) yoki xabarni yuboring:", 
                             reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🏠 Bosh menyu")]], resize_keyboard=True))
     await state.set_state(UserState.order_data)
 
-# --- HAVOLA QABUL QILISH VA TASDIQLASH ---
+# --- ISTALGAN XABARNI QABUL QILISH (YORDAM FUNKSIYASI KABI) ---
 @dp.message(UserState.order_data)
 async def buy_step2(message: types.Message, state: FSMContext):
     if message.text == "🏠 Bosh menyu": return await start_handler(message, state)
     
-    user_link = message.text or message.caption # Havola matn yoki caption bo'lishi mumkin
-    if not user_link:
-        return await message.answer("❌ Iltimos, havola yuboring!")
-
-    await state.update_data(user_link=user_link)
+    # Xabarning barcha ma'lumotlarini saqlaymiz
+    content = message.text or message.caption or "Xabar yuborildi"
+    await state.update_data(
+        user_msg_id=message.message_id,
+        user_chat_id=message.chat.id,
+        user_link=content
+    )
+    
     data = await state.get_data()
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Tasdiqlash", callback_data="confirm_order_yes"),
          InlineKeyboardButton(text="❌ Bekor qilish", callback_data="confirm_order_no")]
     ])
     
-    await message.answer(f"📊 **Buyurtmani tasdiqlang:**\n\n"
-                         f"📦 Xizmat: {data['name']}\n"
-                         f"💰 Narxi: {data['price']:,} so'm\n"
-                         f"🔗 Havola: `{user_link}`", 
+    await message.answer(f"📊 **Buyurtmangizni tasdiqlang:**\n\n📦 Xizmat: {data['name']}\n💰 Narxi: {data['price']:,} so'm", 
                          reply_markup=kb, parse_mode="Markdown")
     await state.set_state(UserState.confirm_order)
 
@@ -149,83 +140,118 @@ async def buy_step2(message: types.Message, state: FSMContext):
 async def buy_step3(call: types.CallbackQuery, state: FSMContext):
     res = call.data.split("_")[2]
     if res == "no":
-        await call.message.edit_text("❌ Buyurtma bekor qilindi.")
-        await state.clear()
-        return
+        await call.message.edit_text("❌ Bekor qilindi.")
+        return await state.clear()
 
     data = await state.get_data()
     u_id = call.from_user.id
-    u_name = call.from_user.full_name
     
-    # Bugungi tartib raqami
+    # Balansni tekshirish
+    user = await users_col.find_one({"user_id": u_id})
+    if user['balance'] < data['price']:
+        await call.answer("❌ Balansda pul yetarli emas!", show_alert=True)
+        return await state.clear()
+
     today_str = datetime.now().strftime("%Y-%m-%d")
     daily_count = await orders_col.count_documents({"date_only": today_str}) + 1
 
-    # Buyurtmani bazaga yozish
+    # Saqlash
     order = await orders_col.insert_one({
-        "u_id": u_id, "u_name": u_name, "name": data['name'], "price": data['price'], 
-        "info": data['user_link'], "status": "pending", "date_only": today_str, "order_num": daily_count
+        "u_id": u_id, "u_name": call.from_user.full_name, "name": data['name'], 
+        "price": data['price'], "status": "pending", "date_only": today_str, "order_num": daily_count
     })
     
-    # Balansdan ayirish
     await users_col.update_one({"user_id": u_id}, {"$inc": {"balance": -data['price']}})
 
-    # ADMINGA YUBORISH
+    # ADMINGA COPY_MESSAGE ORQALI YUBORISH
     admin_kb_order = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Bajarildi", callback_data=f"adm_o_y_{order.inserted_id}"),
          InlineKeyboardButton(text="❌ Rad etish", callback_data=f"adm_o_n_{order.inserted_id}")]
     ])
     
-    admin_msg = (f"🔔 **YANGI BUYURTMA #{daily_count}**\n\n"
-                 f"👤 Mijoz: {u_name}\n"
-                 f"🆔 ID: `{u_id}`\n"
-                 f"📦 Xizmat: {data['name']}\n"
-                 f"💰 Summa: {data['price']:,} so'm\n"
-                 f"🔗 **HAVOLA:** `{data['user_link']}`\n"
-                 f"📅 Sana: {today_str}")
+    await bot.send_message(ADMIN_ID, f"🆕 **BUYURTMA #{daily_count}**\n👤: {call.from_user.full_name}\n📦: {data['name']}\n💰: {data['price']:,} so'm")
     
-    await bot.send_message(ADMIN_ID, admin_msg, reply_markup=admin_kb_order, parse_mode="Markdown", disable_web_page_preview=True)
-    await call.message.edit_text(f"✅ Buyurtmangiz qabul qilindi! Bugungi tartib raqamingiz: #{daily_count}")
+    # Foydalanuvchi yuborgan original xabarni adminga nusxalash
+    await bot.copy_message(
+        chat_id=ADMIN_ID,
+        from_chat_id=data['user_chat_id'],
+        message_id=data['user_msg_id'],
+        reply_markup=admin_kb_order
+    )
+
+    await call.message.edit_text(f"✅ Qabul qilindi! Raqamingiz: #{daily_count}")
     await state.clear()
 
+# --- ADMIN JAVOBI ---
 @dp.callback_query(F.data.startswith("adm_o_"))
 async def admin_order_res(call: types.CallbackQuery):
     _, _, res, o_id = call.data.split("_")
     order = await orders_col.find_one({"_id": ObjectId(o_id)})
-    if not order: return await call.answer("Buyurtma topilmadi.")
-
+    if not order: return
+    
     if res == "y":
-        await bot.send_message(order['u_id'], f"✅ Buyurtmangiz ({order['name']}) muvaffaqiyatli bajarildi!")
-        await orders_col.update_one({"_id": ObjectId(o_id)}, {"$set": {"status": "completed"}})
+        await bot.send_message(order['u_id'], f"✅ Buyurtmangiz ({order['name']}) bajarildi!")
     else:
         await users_col.update_one({"user_id": order['u_id']}, {"$inc": {"balance": order['price']}})
-        await bot.send_message(order['u_id'], f"❌ Buyurtmangiz ({order['name']}) rad etildi. Pullar qaytarildi.")
-        await orders_col.update_one({"_id": ObjectId(o_id)}, {"$set": {"status": "rejected"}})
+        await bot.send_message(order['u_id'], "❌ Buyurtma rad etildi, pul qaytarildi.")
     
-    await call.message.edit_text(call.message.text + "\n\n✅ JARAYON YAKUNLANDI.")
-    await call.answer("Bajarildi")
+    await call.message.delete()
 
-# --- QOLGAN FUNKSIYALAR (Balans, Statistika, Admin) ---
+# --- BALANS VA TO'LOV ---
 @dp.message(F.text == "💰 Balans")
 async def bal_cmd(message: types.Message):
     user = await users_col.find_one({"user_id": message.from_user.id})
-    await message.answer(f"💰 Sizning balansingiz: **{user['balance']:,} so'm**", parse_mode="Markdown")
+    await message.answer(f"💰 Balans: {user['balance']:,} so'm")
 
+@dp.message(F.text == "💳 Hisobni to'ldirish")
+async def pay_init(message: types.Message, state: FSMContext):
+    await message.answer("To'lovdan so'ng screenshot yuboring:")
+    await state.set_state(UserState.pay_photo)
+
+@dp.message(UserState.pay_photo, F.photo)
+async def pay_p(message: types.Message, state: FSMContext):
+    await state.update_data(photo=message.photo[-1].file_id)
+    await message.answer("Summani kiriting:")
+    await state.set_state(UserState.pay_sum)
+
+@dp.message(UserState.pay_sum)
+async def pay_s(message: types.Message, state: FSMContext):
+    if not message.text.isdigit(): return
+    data = await state.get_data()
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Tasdiq", callback_data=f"adm_p_y_{message.from_user.id}_{message.text}")]])
+    await bot.send_photo(ADMIN_ID, data['photo'], caption=f"To'lov so'rovi\nID: {message.from_user.id}\nSumma: {message.text}", reply_markup=kb)
+    await message.answer("✅ Yuborildi.")
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("adm_p_y_"))
+async def admin_pay_ok(call: types.CallbackQuery):
+    _, _, _, u_id, amt = call.data.split("_")
+    await users_col.update_one({"user_id": int(u_id)}, {"$inc": {"balance": int(amt)}})
+    await bot.send_message(int(u_id), f"✅ Hisobingiz {amt} so'mga to'ldirildi.")
+    await call.message.delete()
+
+# --- ADMIN PANEL ---
 @dp.message(Command("admin"))
-async def admin_panel(message: types.Message, state: FSMContext):
+async def admin_panel(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await state.clear()
-        await message.answer("🛠 Admin paneliga xush kelibsiz!", reply_markup=admin_kb())
+        await message.answer("Admin panel", reply_markup=admin_kb())
 
-# --- ASOSIY MAIN ---
+# --- YORDAM ---
+@dp.message(F.text == "🆘 Yordam")
+async def help_init(message: types.Message, state: FSMContext):
+    await message.answer("Xabaringizni yozing:")
+    await state.set_state(UserState.help_msg)
+
+@dp.message(UserState.help_msg)
+async def help_done(message: types.Message, state: FSMContext):
+    await bot.copy_message(ADMIN_ID, message.chat.id, message.message_id)
+    await message.answer("✅ Adminga yuborildi.")
+    await state.clear()
+
 async def main():
     asyncio.create_task(start_web_server())
     await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("Bot ishga tushdi...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logging.info("Bot to'xtatildi.")
+    asyncio.run(main())
