@@ -87,7 +87,20 @@ async def start_handler(message: types.Message, state: FSMContext):
          "$setOnInsert": {"balance": 0, "total_in": 0}},
         upsert=True
     )
+    
     await message.answer(f"Xush kelibsiz, {message.from_user.full_name}!", reply_markup=main_kb())
+    
+    # Agar kirgan odam admin bo'lsa, unga eslatma berish
+    if u_id == ADMIN_ID:
+        await message.answer("🛠 Siz adminsiz. Admin panelga kirish uchun /admin buyrug'ini yuboring.")
+
+# --- ADMIN PANEL KIRISH ---
+@dp.message(Command("admin"))
+async def admin_panel_cmd(message: types.Message):
+    if message.from_user.id == ADMIN_ID:
+        await message.answer("🛠 **Admin paneliga xush kelibsiz!**\nBoshqarish uchun tugmalardan foydalaning:", reply_markup=admin_kb(), parse_mode="Markdown")
+    else:
+        await message.answer("❌ Kechirasiz, bu buyruq faqat admin uchun.")
 
 # --- FOYDALANUVCHI: BALANS ---
 @dp.message(F.text == "💰 Balans")
@@ -126,7 +139,6 @@ async def help_init(message: types.Message, state: FSMContext):
 async def help_done(message: types.Message, state: FSMContext):
     u_id = message.from_user.id
     u_name = message.from_user.full_name
-    # Adminga murojaat yuborish
     await bot.send_message(ADMIN_ID, f"🆘 **YANGI MUROJAAT**\n\n👤 Ismi: {u_name}\n🆔 ID: `{u_id}`\n\n👇 Xabar:")
     await bot.copy_message(ADMIN_ID, message.chat.id, message.message_id)
     await message.answer("✅ Xabaringiz adminga yetkazildi.", reply_markup=main_kb())
@@ -141,7 +153,6 @@ async def admin_stat(message: types.Message):
     t_count = await users_col.count_documents({"last_seen": today})
     m_count = await users_col.count_documents({"month": month})
     
-    # Eng ko'p pul kiritgan 10 ta foydalanuvchi
     top_users = await users_col.find().sort("total_in", -1).limit(10).to_list(None)
     top_text = "🔝 **Top 10 kiritilgan summa bo'yicha:**\n"
     for i, u in enumerate(top_users, 1):
