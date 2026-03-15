@@ -51,9 +51,10 @@ class AdminState(StatesGroup):
     edit_card = State()
     add_channel = State()
     send_news = State()
-    # Yangi holatlar
     edit_cat_new_name = State()
     edit_serv_new_price = State()
+    # Yangi holat: Balans tahrirlash uchun
+    edit_user_balance = State()
 
 class UserState(StatesGroup):
     order_data = State()
@@ -182,6 +183,8 @@ async def admin_order_res(call: types.CallbackQuery):
 @dp.message(F.text == "💳 Hisobni to'ldirish")
 async def pay_init(message: types.Message, state: FSMContext):
     cards = await settings_col.find({"type": "card"}).to_list(None)
+    if not cards:
+        return await message.answer("Hozircha to'lov uchun kartalar mavjud emas.")
     card_text = "\n".join([f"💳 {c['name']}: `{c['number']}`" for c in cards])
     await message.answer(f"Hisobni to'ldirish uchun to'lov qiling:\n\n{card_text}\n\nTo'lovdan so'ng **screenshot** yuboring:", parse_mode="Markdown")
     await state.set_state(UserState.pay_photo)
@@ -237,7 +240,30 @@ async def news_send(message: types.Message, state: FSMContext):
 async def admin_panel(message: types.Message, state: FSMContext):
     if message.from_user.id == ADMIN_ID:
         await state.clear()
-        await message.answer("🛠 Admin panel:", reply_markup=admin_kb())
+        await message.answer("🛠 Admin paneliga xush kelibsiz!\nBalansni tahrirlash uchun: `/edit_bal`", reply_markup=admin_kb())
+
+# --- ADMIN: BALANS TAHRIRLASH (YANGI XIZMAT) ---
+@dp.message(Command("edit_bal"), F.from_user.id == ADMIN_ID)
+async def edit_bal_start(message: types.Message, state: FSMContext):
+    await message.answer("Foydalanuvchi ID va summani yuboring.\nMasalan: `1234567 50000` (qo'shish) yoki `1234567 -20000` (ayirish)")
+    await state.set_state(AdminState.edit_user_balance)
+
+@dp.message(AdminState.edit_user_balance, F.from_user.id == ADMIN_ID)
+async def edit_bal_save(message: types.Message, state: FSMContext):
+    try:
+        u_id, amount = message.text.split()
+        u_id = int(u_id); amount = int(amount)
+        user = await users_col.find_one({"user_id": u_id})
+        if not user: return await message.answer("Foydalanuvchi topilmadi!")
+        
+        await users_col.update_one({"user_id": u_id}, {"$inc": {"balance": amount}})
+        await message.answer(f"✅ Bajarildi! Yangi balans: {user['balance'] + amount} so'm")
+        try:
+            await bot.send_message(u_id, f"💰 Sizning balansingiz admin tomonidan tahrirlandi. O'zgarish: {amount} so'm")
+        except: pass
+        await state.clear()
+    except:
+        await message.answer("Xato format! ID va summani probel bilan yozing.")
 
 # --- ADMIN: BO'LIM QO'SHISH VA BOSHQARISH ---
 @dp.message(F.text == "📂 Bo'lim/Xizmatlar", F.from_user.id == ADMIN_ID)
@@ -293,7 +319,7 @@ async def a_serv4(message: types.Message, state: FSMContext):
     except:
         await message.answer("Narxni faqat raqamda kiriting!")
 
-# --- ADMIN: TAHRIRLASH VA O'CHIRISH (YANGI) ---
+# --- ADMIN: TAHRIRLASH VA O'CHIRISH ---
 @dp.callback_query(F.data == "a_manage_all")
 async def manage_all(call: types.CallbackQuery):
     cats = await categories_col.find().to_list(100)
@@ -306,18 +332,16 @@ async def manage_all(call: types.CallbackQuery):
         ])
     await call.message.edit_text("Tahrirlash yoki o'chirish uchun bo'limni tanlang:", reply_markup=kb)
 
-# Bo'limni o'chirish
 @dp.callback_query(F.data.startswith("del_cat_"))
 async def delete_category(call: types.CallbackQuery):
     c_id = call.data.split("_")[2]
     cat = await categories_col.find_one({"_id": ObjectId(c_id)})
     if cat:
-        await services_col.delete_many({"category": cat['name']}) # Ichidagi xizmatlarni ham o'chirish
+        await services_col.delete_many({"category": cat['name']})
         await categories_col.delete_one({"_id": ObjectId(c_id)})
-        await call.answer("Bo'lim va uning xizmatlari o'chirildi", show_alert=True)
+        await call.answer("Bo'lim o'chirildi", show_alert=True)
         await manage_all(call)
 
-# Bo'limni tahrirlash
 @dp.callback_query(F.data.startswith("edit_cat_"))
 async def edit_category(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(c_id=call.data.split("_")[2])
@@ -333,7 +357,6 @@ async def edit_cat_save(message: types.Message, state: FSMContext):
     await message.answer("✅ Bo'lim nomi yangilandi.", reply_markup=admin_kb())
     await state.clear()
 
-# Xizmatlarni boshqarish (bo'lim ichida)
 @dp.callback_query(F.data.startswith("manage_cat_"))
 async def manage_services_in_cat(call: types.CallbackQuery):
     c_id = call.data.split("_")[2]
@@ -349,7 +372,6 @@ async def manage_services_in_cat(call: types.CallbackQuery):
     kb.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="a_manage_all")])
     await call.message.edit_text(f"{cat['name']} bo'limidagi xizmatlar:", reply_markup=kb)
 
-# Xizmatni o'chirish
 @dp.callback_query(F.data.startswith("del_serv_"))
 async def delete_service(call: types.CallbackQuery):
     s_id = call.data.split("_")[2]
@@ -357,7 +379,6 @@ async def delete_service(call: types.CallbackQuery):
     await call.answer("Xizmat o'chirildi")
     await manage_all(call)
 
-# Xizmat narxini tahrirlash
 @dp.callback_query(F.data.startswith("edit_serv_"))
 async def edit_service(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(s_id=call.data.split("_")[2])
@@ -372,10 +393,44 @@ async def edit_serv_save(message: types.Message, state: FSMContext):
     await message.answer("✅ Xizmat narxi yangilandi.", reply_markup=admin_kb())
     await state.clear()
 
-# --- ADMIN: SOZLAMALAR ---
+# --- ADMIN: KARTA SOZLAMALARI (TAHRIRLANGAN VA YANGILANGAN) ---
 @dp.message(F.text == "💳 Karta sozlamalari", F.from_user.id == ADMIN_ID)
-async def card_set(message: types.Message, state: FSMContext):
-    await message.answer("Karta: `Nomi:Raqami` (Humo:9860...)")
+async def card_set(message: types.Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Kartalar ro'yxati", callback_data="manage_cards")],
+        [InlineKeyboardButton(text="➕ Yangi karta qo'shish", callback_data="add_new_card_btn")]
+    ])
+    await message.answer("Karta sozlamalari bo'limi:", reply_markup=kb)
+
+@dp.callback_query(F.data == "manage_cards")
+async def manage_cards(call: types.CallbackQuery):
+    cards = await settings_col.find({"type": "card"}).to_list(None)
+    if not cards:
+        return await call.message.answer("Hozircha kartalar yo'q.", reply_markup=admin_kb())
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+    for c in cards:
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(text=f"💳 {c['name']}: {c['number']}", callback_data="none"),
+            InlineKeyboardButton(text="❌ O'chirish", callback_data=f"del_card_{c['_id']}")
+        ])
+    kb.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="back_to_card_main")])
+    await call.message.edit_text("Mavjud kartalar ro'yxati:", reply_markup=kb)
+
+@dp.callback_query(F.data == "back_to_card_main")
+async def back_card(call: types.CallbackQuery):
+    await card_set(call.message)
+
+@dp.callback_query(F.data.startswith("del_card_"))
+async def delete_card(call: types.CallbackQuery):
+    c_id = call.data.split("_")[2]
+    await settings_col.delete_one({"_id": ObjectId(c_id)})
+    await call.answer("Karta o'chirildi")
+    await manage_cards(call)
+
+@dp.callback_query(F.data == "add_new_card_btn")
+async def add_card_btn(call: types.CallbackQuery, state: FSMContext):
+    await call.message.answer("Karta: `Nomi:Raqami` (Masalan: Humo:9860...)")
     await state.set_state(AdminState.edit_card)
 
 @dp.message(AdminState.edit_card)
@@ -383,11 +438,12 @@ async def card_save(message: types.Message, state: FSMContext):
     try:
         name, num = message.text.split(":")
         await settings_col.update_one({"type": "card", "name": name}, {"$set": {"number": num}}, upsert=True)
-        await message.answer("✅ Karta saqlandi.", reply_markup=admin_kb())
+        await message.answer("✅ Karta muvaffaqiyatli saqlandi.", reply_markup=admin_kb())
         await state.clear()
     except:
         await message.answer("Xato format! Nomi:Raqami ko'rinishida yozing.")
 
+# --- ADMIN: MAJBURIY OBUNA ---
 @dp.message(F.text == "📢 Majburiy obuna", F.from_user.id == ADMIN_ID)
 async def sub_set(message: types.Message, state: FSMContext):
     await message.answer("Kanal: `Nomi|ChatID|Link` (Kanal1|-100...|t.me/...)")
