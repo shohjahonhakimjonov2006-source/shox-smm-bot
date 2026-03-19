@@ -2,14 +2,14 @@ import asyncio
 import logging
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton
+    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 )
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
@@ -50,6 +50,7 @@ class AdminState(StatesGroup):
     add_sub_channel = State()
     edit_bal_id = State()
     edit_bal_amt = State()
+    del_cat = State()
 
 class UserState(StatesGroup):
     order_link = State()
@@ -75,12 +76,12 @@ def main_menu(uid):
 
 def admin_menu():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="📂 Bo'lim/Xizmat boshqaruvi")],
-        [KeyboardButton(text="📉 Admin Statistika"), KeyboardButton(text="🏆 Admin TOP")],
-        [KeyboardButton(text="💳 Karta sozlash"), KeyboardButton(text="📢 Xabar yuborish")],
-        [KeyboardButton(text="🎁 Promo yaratish"), KeyboardButton(text="💰 Ref Summa")],
-        [KeyboardButton(text="➕ Majburiy obuna"), KeyboardButton(text="👤 Balansni tahrirlash")],
-        [KeyboardButton(text="🏠 Bosh menyu")]
+        [KeyboardButton(text="📂 Bo'lim qo'shish"), KeyboardButton(text="❌ Bo'lim o'chirish")],
+        [KeyboardButton(text="➕ Xizmat qo'shish"), KeyboardButton(text="📉 Admin Statistika")],
+        [KeyboardButton(text="💳 Karta sozlash"), KeyboardButton(text="🏆 Admin TOP")],
+        [KeyboardButton(text="🎁 Promo yaratish"), KeyboardButton(text="📢 Xabar yuborish")],
+        [KeyboardButton(text="💰 Ref Summa"), KeyboardButton(text="➕ Majburiy obuna")],
+        [KeyboardButton(text="👤 Balansni tahrirlash"), KeyboardButton(text="🏠 Bosh menyu")]
     ], resize_keyboard=True)
 
 def back_kb():
@@ -95,7 +96,7 @@ async def check_subscription(uid):
         return member.status not in ["left", "kicked"]
     except: return True
 
-# --- START & REGISTRATION ---
+# --- START ---
 @dp.message(Command("start"))
 async def start_handler(message: types.Message, command: CommandObject, state: FSMContext):
     await state.clear()
@@ -124,29 +125,114 @@ async def start_handler(message: types.Message, command: CommandObject, state: F
             "ref_count": 0, "total_pay": 0, "joined_at": datetime.now(), "used_promos": []
         })
     
-    await message.answer("Botga xush kelibsiz! Kerakli bo'limni tanlang.", reply_markup=main_menu(uid))
+    await message.answer("Xizmat ko'rsatish botiga xush kelibsiz!", reply_markup=main_menu(uid))
 
-# --- ADMIN: TOP LISTS (TALAAB 7) ---
+# --- ADMIN: BO'LIM VA XIZMATLAR (Tuzatildi) ---
+@dp.message(F.text == "📂 Bo'lim qo'shish", F.from_user.id == ADMIN_ID)
+async def adm_add_cat_start(message: types.Message, state: FSMContext):
+    await message.answer("Yangi bo'lim nomini yozing:", reply_markup=back_kb())
+    await state.set_state(AdminState.add_cat)
+
+@dp.message(AdminState.add_cat, F.text != "⬅️ Ortga")
+async def adm_add_cat_save(message: types.Message, state: FSMContext):
+    await categories_col.insert_one({"name": message.text})
+    await message.answer(f"✅ {message.text} bo'limi qo'shildi!", reply_markup=admin_menu())
+    await state.clear()
+
+@dp.message(F.text == "➕ Xizmat qo'shish", F.from_user.id == ADMIN_ID)
+async def adm_add_serv_start(message: types.Message):
+    cats = await categories_col.find().to_list(None)
+    if not cats: return await message.answer("Avval bo'lim qo'shishingiz kerak!")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=c['name'], callback_data=f"addserv_{c['_id']}")] for c in cats])
+    await message.answer("Xizmat qaysi bo'limga qo'shilsin?", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("addserv_"))
+async def adm_add_serv_name(call: types.CallbackQuery, state: FSMContext):
+    cat_id = call.data.split("_")[1]
+    await state.update_data(cat_id=cat_id)
+    await call.message.answer("Xizmat nomini yozing:", reply_markup=back_kb())
+    await state.set_state(AdminState.add_serv_name)
+
+@dp.message(AdminState.add_serv_name, F.text != "⬅️ Ortga")
+async def adm_add_serv_price(message: types.Message, state: FSMContext):
+    await state.update_data(s_name=message.text)
+    await message.answer("Xizmat narxini yozing (faqat son):")
+    await state.set_state(AdminState.add_serv_price)
+
+@dp.message(AdminState.add_serv_price, F.text.isdigit())
+async def adm_add_serv_save(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    await services_col.insert_one({
+        "cat_id": data['cat_id'],
+        "name": data['s_name'],
+        "price": int(message.text)
+    })
+    await message.answer("✅ Xizmat muvaffaqiyatli qo'shildi!", reply_markup=admin_menu())
+    await state.clear()
+
+# --- ADMIN: KARTA SOZLASH ---
+@dp.message(F.text == "💳 Karta sozlash", F.from_user.id == ADMIN_ID)
+async def adm_card_start(message: types.Message, state: FSMContext):
+    await message.answer("Karta raqamini yozing:", reply_markup=back_kb())
+    await state.set_state(AdminState.set_card_num)
+
+@dp.message(AdminState.set_card_num, F.text != "⬅️ Ortga")
+async def adm_card_name(message: types.Message, state: FSMContext):
+    await state.update_data(c_num=message.text)
+    await message.answer("Karta egasi ismini yozing:")
+    await state.set_state(AdminState.set_card_owner)
+
+@dp.message(AdminState.set_card_owner, F.text != "⬅️ Ortga")
+async def adm_card_save(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    await settings_col.update_one({"key": "card"}, {"$set": {"num": data['c_num'], "owner": message.text}}, upsert=True)
+    await message.answer("✅ Karta ma'lumotlari saqlandi!", reply_markup=admin_menu())
+    await state.clear()
+
+# --- ADMIN: STATISTIKA (Tuzatildi) ---
+@dp.message(F.text == "📉 Admin Statistika", F.from_user.id == ADMIN_ID)
+async def adm_stats(message: types.Message):
+    total_users = await users_col.count_documents({})
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    users_today = await users_col.count_documents({"joined_at": {"$gte": today}})
+    orders_today = await orders_col.count_documents({"date": {"$gte": today}})
+    
+    # Umumiy balanslar yig'indisi
+    all_users = await users_col.find().to_list(None)
+    total_balance = sum(u.get('balance', 0) for u in all_users)
+    total_payments = sum(u.get('total_pay', 0) for u in all_users)
+
+    text = (
+        f"📊 **Bot Statistikasi**\n\n"
+        f"👤 Jami foydalanuvchilar: {total_users}\n"
+        f"🆕 Bugun qo'shilganlar: {users_today}\n"
+        f"📦 Bugungi buyurtmalar: {orders_today}\n"
+        f"💰 Foydalanuvchilar jami balansi: {total_balance:,} so'm\n"
+        f"💳 Jami qilingan to'lovlar: {total_payments:,} so'm"
+    )
+    await message.answer(text, parse_mode="Markdown")
+
+# --- ADMIN: TOP (TALAB 7) ---
 @dp.message(F.text == "🏆 Admin TOP", F.from_user.id == ADMIN_ID)
 async def admin_top_lists(message: types.Message):
     # TOP 10 To'lovchilar
     top_payers = await users_col.find().sort("total_pay", -1).limit(10).to_list(None)
-    payer_text = "💰 **TOP 10 To'lov qilganlar:**\n"
+    payer_text = "💰 **TOP 10 Eng ko'p to'lov qilganlar:**\n"
     for i, u in enumerate(top_payers, 1):
-        payer_text += f"{i}. {u['name']} (ID: `{u['user_id']}`) — {u['total_pay']:,} so'm\n"
+        payer_text += f"{i}. {u['name']} | ID: `{u['user_id']}` | {u['total_pay']:,} so'm\n"
     
     # TOP 19 Referallar
     top_refs = await users_col.find().sort("ref_count", -1).limit(19).to_list(None)
-    ref_text = "\n👥 **TOP 19 Referal yig'ganlar:**\n"
+    ref_text = "\n👥 **TOP 19 Eng ko'p referal keltirganlar:**\n"
     for i, u in enumerate(top_refs, 1):
-        ref_text += f"{i}. {u['name']} (ID: `{u['user_id']}`) — {u['ref_count']} ta\n"
+        ref_text += f"{i}. {u['name']} | ID: `{u['user_id']}` | {u['ref_count']} ta\n"
         
     await message.answer(payer_text + ref_text, parse_mode="Markdown")
 
-# --- ADMIN: PROMO SYSTEM (TALAB 8, 10) ---
+# --- ADMIN: PROMO (TALAB 8, 10) ---
 @dp.message(F.text == "🎁 Promo yaratish", F.from_user.id == ADMIN_ID)
 async def adm_promo1(message: types.Message, state: FSMContext):
-    await message.answer("Yangi Promo-kod nomini yozing (Masalan: UZBEK):", reply_markup=back_kb())
+    await message.answer("Yangi Promo-kod nomini yozing:", reply_markup=back_kb())
     await state.set_state(AdminState.promo_code)
 
 @dp.message(AdminState.promo_code, F.text != "⬅️ Ortga")
@@ -158,101 +244,94 @@ async def adm_promo2(message: types.Message, state: FSMContext):
 @dp.message(AdminState.promo_amount, F.text.isdigit())
 async def adm_promo3(message: types.Message, state: FSMContext):
     await state.update_data(p_amt=int(message.text))
-    await message.answer("Promo-kod ishlatilish sonini (limit) kiriting:")
+    await message.answer("Promo-kod necha kishi uchun ishlasin (limit):")
     await state.set_state(AdminState.promo_limit)
 
 @dp.message(AdminState.promo_limit, F.text.isdigit())
 async def adm_promo_save(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    p_code = data['p_code']
-    p_amt = data['p_amt']
-    p_lim = int(message.text)
+    p_code, p_amt, p_lim = data['p_code'], data['p_amt'], int(message.text)
     
     await promos_col.insert_one({"code": p_code, "amount": p_amt, "limit": p_lim, "used": 0})
-    await message.answer(f"✅ Promo-kod yaratildi va barchaga yuborilmoqda!", reply_markup=admin_menu())
+    await message.answer(f"✅ Promo-kod yaratildi!")
     
-    # Barchaga reklama (Talab 10)
+    # Barcha foydalanuvchilarga reklama
     users = await users_col.find().to_list(None)
     for u in users:
-        try: await bot.send_message(u['user_id'], f"🎁 Yangi Promo-kod: `{p_code}`\n💰 Summa: {p_amt:,} so'm\n🔢 Limit: {p_lim} kishiga!")
+        try:
+            await bot.send_message(u['user_id'], f"🎁 **Yangi Promo-kod!**\n\nKod: `{p_code}`\nSumma: {p_amt:,} so'm\nLimit: {p_lim} kishi uchun!\n\nTezroq botga kirib ishlating!")
         except: continue
-    await state.clear()
-
-# --- ADMIN: REFERRAL REWARD (TALAB 9) ---
-@dp.message(F.text == "💰 Ref Summa", F.from_user.id == ADMIN_ID)
-async def adm_ref_reward(message: types.Message, state: FSMContext):
-    await message.answer("Har bir yangi referal uchun beriladigan summani kiriting (o'chirish uchun 0):", reply_markup=back_kb())
-    await state.set_state(AdminState.set_ref_reward)
-
-@dp.message(AdminState.set_ref_reward, F.text.isdigit())
-async def adm_ref_save(message: types.Message, state: FSMContext):
-    amt = int(message.text)
-    await settings_col.update_one({"key": "ref_reward"}, {"$set": {"val": amt}}, upsert=True)
-    await message.answer(f"✅ Referal summasi {amt} so'mga o'rnatildi.", reply_markup=admin_menu())
     await state.clear()
 
 # --- ADMIN: MAJBURIY OBUNA (TALAB 13) ---
 @dp.message(F.text == "➕ Majburiy obuna", F.from_user.id == ADMIN_ID)
-async def adm_sub1(message: types.Message, state: FSMContext):
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Obunani o'chirish", callback_data="del_sub")]])
-    await message.answer("Kanal ID raqamini va URLini kiriting.\nFormat: `ID | URL` (Masalan: `-100123456 | https://t.me/kanal`)", parse_mode="Markdown", reply_markup=kb)
+async def adm_sub_start(message: types.Message, state: FSMContext):
+    await message.answer("Kanal IDsi va Linkini yuboring.\nFormat: `-100123 | https://t.me/link`", reply_markup=back_kb())
     await state.set_state(AdminState.add_sub_channel)
 
-@dp.message(AdminState.add_sub_channel, F.text.contains("|"))
-async def adm_sub2(message: types.Message, state: FSMContext):
-    cid, curl = message.text.split("|")
-    await settings_col.update_one({"key": "sub_channel"}, {"$set": {"id": cid.strip(), "url": curl.strip()}}, upsert=True)
-    await message.answer("✅ Majburiy obuna kanali o'rnatildi.", reply_markup=admin_menu())
-    await state.clear()
+@dp.message(AdminState.add_sub_channel, F.text != "⬅️ Ortga")
+async def adm_sub_save(message: types.Message, state: FSMContext):
+    try:
+        cid, clink = message.text.split(" | ")
+        await settings_col.update_one({"key": "sub_channel"}, {"$set": {"id": cid.strip(), "url": clink.strip()}}, upsert=True)
+        await message.answer("✅ Majburiy obuna kanali saqlandi!", reply_markup=admin_menu())
+        await state.clear()
+    except:
+        await message.answer("Xato format! Namuna: `-100123 | https://t.me/link`")
 
-@dp.callback_query(F.data == "del_sub")
-async def adm_sub_del(call: types.CallbackQuery):
-    await settings_col.delete_one({"key": "sub_channel"})
-    await call.message.edit_text("✅ Majburiy obuna o'chirildi.")
-
-# --- ADMIN: BROADCAST (TALAB 12) ---
+# --- ADMIN: BROADCAST ---
 @dp.message(F.text == "📢 Xabar yuborish", F.from_user.id == ADMIN_ID)
-async def adm_bc1(message: types.Message, state: FSMContext):
+async def adm_bc_start(message: types.Message, state: FSMContext):
     await message.answer("Barcha foydalanuvchilarga yuboriladigan xabarni yozing:", reply_markup=back_kb())
     await state.set_state(AdminState.broadcast_msg)
 
 @dp.message(AdminState.broadcast_msg, F.text != "⬅️ Ortga")
-async def adm_bc2(message: types.Message, state: FSMContext):
+async def adm_bc_send(message: types.Message, state: FSMContext):
     users = await users_col.find().to_list(None)
+    count = 0
     for u in users:
-        try: await bot.send_message(u['user_id'], message.text)
+        try:
+            await bot.send_message(u['user_id'], message.text)
+            count += 1
         except: continue
-    await message.answer("✅ Xabar hamma foydalanuvchilarga yuborildi.", reply_markup=admin_menu())
+    await message.answer(f"✅ Xabar {count} ta foydalanuvchiga yuborildi.", reply_markup=admin_menu())
     await state.clear()
 
-# --- USER: HELP (TALAB 11) ---
-@dp.message(F.text == "🆘 Yordam")
-async def user_help(message: types.Message, state: FSMContext):
-    await message.answer("Admin uchun xabaringizni yozing:", reply_markup=back_kb())
-    await state.set_state(UserState.help_text)
+# --- FOYDALANUVCHI: STATISTIKA ---
+@dp.message(F.text == "📊 Statistika")
+async def user_stats(message: types.Message):
+    uid = message.from_user.id
+    user = await users_col.find_one({"user_id": uid})
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    total_u = await users_col.count_documents({})
+    today_u = await users_col.count_documents({"joined_at": {"$gte": today}})
+    today_o = await orders_col.count_documents({"date": {"$gte": today}})
+    
+    text = (
+        f"📊 **Bot statistikasi**\n\n"
+        f"👤 Jami foydalanuvchilar: {total_u}\n"
+        f"🆕 Bugun qo'shilganlar: {today_u}\n"
+        f"📦 Bugungi jami buyurtmalar: {today_o}\n\n"
+        f"💰 Sizning jami to'lovingiz: {user.get('total_pay', 0):, } so'm"
+    )
+    await message.answer(text, parse_mode="Markdown")
 
-@dp.message(UserState.help_text, F.text != "⬅️ Ortga")
-async def user_help_send(message: types.Message, state: FSMContext):
-    await bot.send_message(ADMIN_ID, f"🆘 **Yangi xabar (Yordam):**\n👤 FIO: {message.from_user.full_name}\n🆔 ID: `{message.from_user.id}`\n\n💬 Matn: {message.text}", parse_mode="Markdown")
-    await message.answer("✅ Xabaringiz adminga yuborildi. Tez orada javob olasiz.", reply_markup=main_menu(message.from_user.id))
-    await state.clear()
-
-# --- ADMIN PANEL ---
+# --- ADMIN PANEL KIRISH ---
 @dp.message(F.text == "🛠 Admin Panel", F.from_user.id == ADMIN_ID)
-async def adm_panel(message: types.Message):
-    await message.answer("Admin boshqaruv paneliga xush kelibsiz:", reply_markup=admin_menu())
+async def adm_panel_entry(message: types.Message):
+    await message.answer("Admin boshqaruv paneliga xush kelibsiz!", reply_markup=admin_menu())
 
 @dp.message(F.text == "🏠 Bosh menyu")
 @dp.message(F.text == "⬅️ Ortga")
-async def universal_back(message: types.Message, state: FSMContext):
+async def back_to_main(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Asosiy menyuga qaytdingiz.", reply_markup=main_menu(message.from_user.id))
 
-# --- SERVER RUN (RENDER CONFLICT FIX) ---
-async def handle(request): return web.Response(text="Bot is running smoothly!")
+# --- SERVER ---
+async def handle(request): return web.Response(text="Bot Active")
 
 async def main():
-    # Render port
     app = web.Application()
     app.router.add_get("/", handle)
     runner = web.AppRunner(app)
@@ -261,9 +340,7 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     
-    # Conflict oldini olish
     await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("🚀 Bot start polling...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
