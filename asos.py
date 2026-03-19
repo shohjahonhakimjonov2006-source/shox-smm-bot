@@ -15,7 +15,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 
 # --- KONFIGURATSIYA ---
-TOKEN = "8678413684:AAGlG1FRn8l960oCDKRrnKigcuUxi0nwEhM"
+TOKEN = "8678413684:AAF6eNkkznizwFSoZYuQGGuHoYJg-ukXQM0"
 ADMIN_ID = 7861165622
 MONGO_URL = "mongodb+srv://Zoirbek2003:Zoirbek2003@zoirbek2003.paka8jf.mongodb.net/?appName=ZOirbek2003"
 
