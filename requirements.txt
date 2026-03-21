@@ -1,6 +1,3 @@
 aiogram
-fastapi
-uvicorn
 motor
-aiohttp
-python-dotenv
+pymongo
