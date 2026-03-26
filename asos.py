@@ -1,171 +1,173 @@
 import asyncio
 import logging
-import sys
-import os
-import certifi
-from threading import Thread
-from flask import Flask
+import sqlite3
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart, Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.filters import Command, CommandStart
 from aiogram.utils.deep_linking import create_start_link
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, SwitchInlineQueryChosenChat
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from motor.motor_asyncio import AsyncIOMotorClient
 
-# --- SOZLAMALAR ---
-API_TOKEN = '8678413684:AAHnoyOgk5AhKwF4kYbcu_11d5M5rpLgpw0'
-MONGO_URL = "mongodb+srv://Zoirbek2003:Zoirbek2003@zoirbek2003.paka8jf.mongodb.net/smm_ultra?retryWrites=true&w=majority"
-ADMIN_ID = 7861165622
+# --- Sozlamalar ---
+API_TOKEN = '8473159649:AAG0IugU_AKJ6EMPVjWvfZj9f5w_qHXmEUc'
+ADMIN_ID = 7861165622  # O'zingizning ID-ingiz
 
-# MongoDB ulanishi
-client = AsyncIOMotorClient(MONGO_URL, tlsCAFile=certifi.where())
-db = client['smm_ultra']
-users_col = db['users']
-settings_col = db['settings']
-stats_backup_col = db['stats_backup']
+logging.basicConfig(level=logging.INFO)
+
+# --- Ma'lumotlar ombori (Kengaytirilgan) ---
+conn = sqlite3.connect('anon_pro.db')
+cursor = conn.cursor()
+cursor.execute('''CREATE TABLE IF NOT EXISTS users 
+                  (user_id INTEGER PRIMARY KEY, username TEXT, joined_at DATE)''')
+cursor.execute('''CREATE TABLE IF NOT EXISTS messages 
+                  (id INTEGER PRIMARY KEY AUTOINCREMENT, sent_at DATE)''')
+conn.commit()
+
+class ChatStates(StatesGroup):
+    waiting_for_anon_message = State()
+    waiting_for_reply = State()
+    waiting_for_broadcast = State()
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- FSM STATES (Admin uchun) ---
-class AdminState(StatesGroup):
-    waiting_broadcast = State()
-    waiting_channel_id = State()
-    waiting_channel_url = State()
-    waiting_gift_text = State()
-    waiting_points = State()
-    waiting_find_id = State()
-
-# --- YORDAMCHI FUNKSIYALAR ---
-async def get_config():
-    config = await settings_col.find_one({"id": "main"})
-    if not config:
-        config = {
-            "id": "main", "channels": [], "gift_text": "Sovg'alar",
-            "terms_text": "Shartlar", "point_per_ref": 10,
-            "cert_limit": 50, "private_link": "https://t.me/+example"
-        }
-        await settings_col.insert_one(config)
-    return config
-
-async def check_all_subs(user_id, channels):
-    for ch in channels:
-        try:
-            member = await bot.get_chat_member(ch['id'], user_id)
-            if member.status in ['left', 'kicked']: return False
-        except: return False
-    return True
-
-# --- MENYULAR ---
-def main_menu():
-    kb = [
-        [KeyboardButton(text="🎁 Konkursga qatnashish")],
-        [KeyboardButton(text="📊 Reyting"), KeyboardButton(text="💰 Ballarim")],
-        [KeyboardButton(text="📜 Shartlar"), KeyboardButton(text="🏆 Sovg'alar")],
-        [KeyboardButton(text="🎓 Sertifikat olish")]
-    ]
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
-
-def admin_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Xabar yuborish", callback_data="adm_send")],
-        [InlineKeyboardButton(text="➕ Kanal qo'shish", callback_data="adm_add_ch"), InlineKeyboardButton(text="🗑 Kanallarni tozalash", callback_data="adm_clear_ch")],
-        [InlineKeyboardButton(text="💰 Ballni o'zgartirish", callback_data="adm_set_p")],
-        [InlineKeyboardButton(text="🔍 ID orqali topish", callback_data="adm_find")],
-        [InlineKeyboardButton(text="🔄 Statistikani tozalash", callback_data="adm_reset_stats")]
+# --- Yordamchi Funksiyalar ---
+async def send_personal_link(message: types.Message, user_id: int):
+    link = await create_start_link(bot, str(user_id), encode=False)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Havolani ulashish", 
+                              switch_inline_query=f"\nMen bilan anonim gaplashish uchun bosing:\n{link}")]
     ])
+    await message.answer(f"🔗 Bu sizning shaxsiy havolangiz:\n\n{link}", reply_markup=kb)
 
-# --- USER HANDLERLAR ---
+def log_message():
+    cursor.execute("INSERT INTO messages (sent_at) VALUES (?)", (datetime.now().date(),))
+    conn.commit()
+
+# --- Handlerlar ---
+
 @dp.message(CommandStart())
-async def cmd_start(message: types.Message):
+async def start_cmd(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    today = datetime.now().date()
+    cursor.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?)", (user_id, message.from_user.username, today))
+    conn.commit()
+
     args = message.text.split()
-    config = await get_config()
-    
-    user = await users_col.find_one({"user_id": user_id})
-    if not user:
-        count = await users_col.count_documents({})
-        user_data = {
-            "user_id": user_id, "custom_id": count + 1,
-            "full_name": message.from_user.full_name, "points": 0,
-            "referred_by": None, "full_claimed": False
-        }
-        if len(args) > 1 and args[1].isdigit():
-            ref_id = int(args[1])
-            if ref_id != user_id:
-                user_data["referred_by"] = ref_id
-                bonus = config['point_per_ref'] // 3
-                await users_col.update_one({"user_id": ref_id}, {"$inc": {"points": bonus}})
-                await bot.send_message(ref_id, f"🎁 Yangi do'st! Sizga {bonus} ball berildi.")
-        await users_col.insert_one(user_data)
-    
-    await message.answer("Xush kelibsiz!", reply_markup=main_menu())
-
-@dp.message(F.text == "🎁 Konkursga qatnashish")
-async def join_contest(message: types.Message):
-    config = await get_config()
-    if not config['channels']:
-        await message.answer("Konkurs vaqtinchalik to'xtatilgan.")
-        return
-        
-    is_sub = await check_all_subs(message.from_user.id, config['channels'])
-    if is_sub:
-        link = await create_start_link(bot, str(message.from_user.id), encode=False)
-        user = await users_col.find_one({"user_id": message.from_user.id})
-        if user.get("referred_by") and not user.get("full_claimed"):
-            total_bonus = config['point_per_ref'] - (config['point_per_ref'] // 3)
-            await users_col.update_one({"user_id": user['referred_by']}, {"$inc": {"points": total_bonus}})
-            await users_col.update_one({"user_id": message.from_user.id}, {"$set": {"full_claimed": True}})
-            await bot.send_message(user['referred_by'], "🔥 Do'stingiz kanallarga obuna bo'ldi! Qolgan ballar berildi.")
-        await message.answer(f"Siz ro'yxatdan o'tdingiz!\n\nReferal havolangiz:\n{link}")
+    if len(args) > 1:
+        target_id = args[1]
+        if target_id == str(user_id):
+            await message.answer("❌ O'zingizga yozish mumkin emas.")
+            return
+        await state.update_data(target_id=target_id)
+        await state.set_state(ChatStates.waiting_for_anon_message)
+        await message.answer("📝 Anonim xabaringizni yozing:")
     else:
-        kb = [[InlineKeyboardButton(text="Obuna bo'lish", url=c['url'])] for c in config['channels']]
-        kb.append([InlineKeyboardButton(text="✅ Tekshirish", callback_data="check_sub")])
-        await message.answer("Konkursda qatnashish uchun kanallarga obuna bo'ling:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+        await message.answer("Xush kelibsiz! Quyidagi havola orqali sizga anonim xabar yozishlari mumkin.")
+        await send_personal_link(message, user_id)
 
-@dp.message(F.text == "📊 Reyting")
-async def show_rating(message: types.Message):
-    cursor = users_col.find().sort("points", -1).limit(100)
-    text = "🏆 **TOP 100**\n\n"
-    i = 1
-    async for u in cursor:
-        text += f"{i}. {u['full_name']} — {u['points']} ball\n"
-        i += 1
-    await message.answer(text, parse_mode="Markdown")
+# Anonim xabar yuborish
+@dp.message(ChatStates.waiting_for_anon_message)
+async def handle_anon(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    target_id = data.get('target_id')
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✍️ Javob berish", callback_data=f"reply_{message.from_user.id}")]
+    ])
+    
+    try:
+        header = "📩 Yangi anonim xabar:\n\n"
+        if int(target_id) == ADMIN_ID:
+            header = f"👤 Kimdan: {message.from_user.full_name} (ID: {message.from_user.id})\n{header}"
+        
+        await bot.send_message(target_id, f"{header}{message.text}", reply_markup=kb)
+        await message.answer("✅ Xabar yuborildi!")
+        log_message()
+        await send_personal_link(message, message.from_user.id) # Yuborganga ham o'z havolasini berish
+        await state.clear()
+    except:
+        await message.answer("❌ Xatolik yuz berdi.")
 
-# --- ADMIN PANEL ---
-@dp.message(Command("admin"), F.from_user.id == ADMIN_ID)
-async def admin_main(message: types.Message):
-    await message.answer("Boshqaruv paneli:", reply_markup=admin_kb())
+# Javob berish tugmasi
+@dp.callback_query(F.data.startswith("reply_"))
+async def start_reply(callback: types.CallbackQuery, state: FSMContext):
+    sender_id = callback.data.split("_")[1]
+    await state.update_data(reply_to=sender_id)
+    await state.set_state(ChatStates.waiting_for_reply)
+    await callback.message.answer("✍️ Javobingizni yozing:")
+    await callback.answer()
 
-@dp.callback_query(F.data == "adm_send", F.from_user.id == ADMIN_ID)
-async def adm_send_start(call: types.CallbackQuery, state: FSMContext):
-    await call.message.answer("Xabarni kiriting:")
-    await state.set_state(AdminState.waiting_broadcast)
+# Javobni yetkazish
+@dp.message(ChatStates.waiting_for_reply)
+async def deliver_reply(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    reply_to = data.get('reply_to')
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✍️ Yana javob yozish", callback_data=f"reply_{message.from_user.id}")]
+    ])
+    
+    try:
+        await bot.send_message(reply_to, f"📩 Sizga javob keldi:\n\n{message.text}", reply_markup=kb)
+        await message.answer("✅ Javobingiz yetkazildi!")
+        log_message()
+        await send_personal_link(message, message.from_user.id)
+        await state.clear()
+    except:
+        await message.answer("❌ Xabar yetib bormadi.")
 
-@dp.message(AdminState.waiting_broadcast)
-async def process_broadcast(message: types.Message, state: FSMContext):
-    users = users_col.find()
-    async for u in users:
-        try: await bot.send_message(u['user_id'], message.text)
-        except: continue
-    await message.answer("Yuborildi!")
+# --- Admin Panel ---
+@dp.message(Command("admin"))
+async def admin_menu(message: types.Message):
+    if message.from_user.id == ADMIN_ID:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Statistika", callback_data="stats")],
+            [InlineKeyboardButton(text="📢 Reklama", callback_data="broadcast")]
+        ])
+        await message.answer("🛠 Admin boshqaruv paneli:", reply_markup=kb)
+
+@dp.callback_query(F.data == "stats")
+async def show_stats(callback: types.CallbackQuery):
+    today = datetime.now().date()
+    this_month = today.strftime("%Y-%m")
+    
+    # Statistika hisoblash
+    cursor.execute("SELECT COUNT(*) FROM messages WHERE sent_at = ?", (today,))
+    msg_today = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM users WHERE joined_at = ?", (today,))
+    users_today = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM users WHERE joined_at LIKE ?", (f"{this_month}%",))
+    users_month = cursor.fetchone()[0]
+    
+    text = (f"📊 **Bot Statistikasi**\n\n"
+            f"📅 Bugungi xabarlar: {msg_today} ta\n"
+            f"🆕 Bugun qo'shilganlar: {users_today} ta\n"
+            f"📅 Shu oyda qo'shilganlar: {users_month} ta")
+    await callback.message.answer(text, parse_mode="Markdown")
+    await callback.answer()
+
+# Reklama yuborish handlerlari (avvalgi kod bilan bir xil)
+@dp.callback_query(F.data == "broadcast")
+async def br_start(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(ChatStates.waiting_for_broadcast)
+    await callback.message.answer("Reklama xabarini yuboring:")
+    await callback.answer()
+
+@dp.message(ChatStates.waiting_for_broadcast)
+async def br_do(message: types.Message, state: FSMContext):
+    cursor.execute("SELECT user_id FROM users")
+    users = cursor.fetchall()
+    for u in users:
+        try: await message.copy_to(u[0])
+        except: pass
+    await message.answer("✅ Tarqatildi.")
     await state.clear()
 
-# --- WEB SERVER (Render uchun) ---
-app = Flask(__name__)
-@app.route('/')
-def home(): return "Bot is running!"
-
-def run_flask():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
 async def main():
-    logging.basicConfig(level=logging.INFO)
-    # Flaskni alohida oqimda ishga tushirish
-    Thread(target=run_flask).start()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
