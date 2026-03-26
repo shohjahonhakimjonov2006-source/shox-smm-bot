@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sqlite3
 import os
+import aiohttp  # YANGI: O'z-o'zini uyg'otish uchun kerak
 from datetime import datetime
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
@@ -14,7 +15,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 # --- SOZLAMALAR ---
 API_TOKEN = '8672594017:AAElGsXRSz8hVeKRhVJw9URE0eCBb1_XYaI'
-ADMIN_ID = 7861165622 # Asosiy bot egasi (Faqat u admin qo'sha oladi)
+ADMIN_ID = 7861165622 
+# Render havolangizni shu yerga yozing (Cron-job uchun)
+APP_URL = "https://shox-smm-bot.onrender.com"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -23,9 +26,7 @@ conn = sqlite3.connect('anon_pro.db', check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, joined_at DATE)')
 cursor.execute('CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sent_at DATE)')
-# Adminlar uchun yangi jadval
 cursor.execute('CREATE TABLE IF NOT EXISTS admins (admin_id INTEGER PRIMARY KEY)')
-# Asosiy adminni bazaga qo'shish
 cursor.execute("INSERT OR IGNORE INTO admins VALUES (?)", (ADMIN_ID,))
 conn.commit()
 
@@ -34,7 +35,6 @@ class ChatStates(StatesGroup):
     waiting_for_reply = State()
     waiting_for_broadcast_content = State()
     waiting_for_link_url = State()
-    # Admin boshqarish uchun yangi holatlar
     waiting_for_new_admin = State()
     waiting_for_remove_admin = State()
 
@@ -46,6 +46,19 @@ def is_admin(user_id):
     cursor.execute("SELECT 1 FROM admins WHERE admin_id = ?", (user_id,))
     return cursor.fetchone() is not None
 
+# --- RENDER UYG'OTISH (SELF-PING) TIZIMI ---
+async def self_ping():
+    """Bot uxlab qolmasligi uchun har 13 daqiqada o'ziga so'rov yuboradi"""
+    await asyncio.sleep(30) # Bot to'liq yoqilishi uchun kutish
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(APP_URL) as response:
+                    logging.info(f"Self-ping yuborildi: {response.status}")
+        except Exception as e:
+            logging.error(f"Self-ping xatosi: {e}")
+        await asyncio.sleep(780) # 13 daqiqa kutish
+
 # --- RENDER PORT (WEB SERVER) ---
 async def handle(request):
     return web.Response(text="Bot faol ishlamoqda!")
@@ -55,8 +68,11 @@ async def start_web_server():
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000)))
+    # Render portini avtomatik aniqlash
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
+    logging.info(f"Web server {port}-portda ishga tushdi")
 
 async def send_personal_link(message: types.Message, user_id: int):
     link = await create_start_link(bot, str(user_id), encode=False)
@@ -97,7 +113,7 @@ async def handle_anon(message: types.Message, state: FSMContext):
     
     try:
         header = "📩 Yangi anonim xabar:\n\n"
-        if is_admin(int(target_id)): # Agar xabar adminga borsa, kimligini ko'rsatish
+        if is_admin(int(target_id)): 
             header = f"👤 Admin uchun (Ism: {message.from_user.full_name}, ID: {message.from_user.id})\n{header}"
         
         await bot.send_message(target_id, header + (message.text or ""), entities=message.entities, reply_markup=kb)
@@ -140,7 +156,6 @@ async def admin_menu(message: types.Message):
             [InlineKeyboardButton(text="📊 Statistika", callback_data="stats")],
             [InlineKeyboardButton(text="📢 Reklama", callback_data="broadcast")]
         ]
-        # Faqat asosiy egasi adminlarni boshqara oladi
         if message.from_user.id == ADMIN_ID:
             kb_list.append([
                 InlineKeyboardButton(text="➕ Admin qo'shish", callback_data="add_adm"),
@@ -167,8 +182,6 @@ async def show_stats(callback: types.CallbackQuery):
             f"📅 Shu oyda qo'shilganlar: {users_month} ta")
     await callback.message.answer(text, parse_mode="Markdown")
     await callback.answer()
-
-# --- YANGI ADMIN QO'SHISH FUNKSIYALARI ---
 
 @dp.callback_query(F.data == "add_adm")
 async def add_adm_start(callback: types.CallbackQuery, state: FSMContext):
@@ -260,8 +273,15 @@ async def final_broadcast(message, state, url):
     await message.answer(f"✅ {count} ta foydalanuvchiga yuborildi.")
     await state.clear()
 
+# --- ASOSIY ISHGA TUSHIRISH ---
 async def main():
+    # 1. Web-serverni (Cron-job so'rovlari uchun) fonda ishga tushirish
     asyncio.create_task(start_web_server())
+    
+    # 2. O'z-o'zini uyg'otish (Self-ping) tizimini fonda ishga tushirish
+    asyncio.create_task(self_ping())
+    
+    # 3. Botni xabarlarni tinglash rejimiga o'tkazish
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
