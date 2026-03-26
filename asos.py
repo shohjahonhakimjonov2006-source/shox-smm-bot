@@ -14,7 +14,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 # --- SOZLAMALAR ---
 API_TOKEN = '8672594017:AAElGsXRSz8hVeKRhVJw9URE0eCBb1_XYaI'
-ADMIN_ID = 7861165622 
+ADMIN_ID = 7861165622 # Asosiy bot egasi (Faqat u admin qo'sha oladi)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -23,6 +23,10 @@ conn = sqlite3.connect('anon_pro.db', check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, joined_at DATE)')
 cursor.execute('CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sent_at DATE)')
+# Adminlar uchun yangi jadval
+cursor.execute('CREATE TABLE IF NOT EXISTS admins (admin_id INTEGER PRIMARY KEY)')
+# Asosiy adminni bazaga qo'shish
+cursor.execute("INSERT OR IGNORE INTO admins VALUES (?)", (ADMIN_ID,))
 conn.commit()
 
 class ChatStates(StatesGroup):
@@ -30,9 +34,17 @@ class ChatStates(StatesGroup):
     waiting_for_reply = State()
     waiting_for_broadcast_content = State()
     waiting_for_link_url = State()
+    # Admin boshqarish uchun yangi holatlar
+    waiting_for_new_admin = State()
+    waiting_for_remove_admin = State()
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+
+# --- YORDAMCHI FUNKSIYALAR ---
+def is_admin(user_id):
+    cursor.execute("SELECT 1 FROM admins WHERE admin_id = ?", (user_id,))
+    return cursor.fetchone() is not None
 
 # --- RENDER PORT (WEB SERVER) ---
 async def handle(request):
@@ -46,7 +58,6 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000)))
     await site.start()
 
-# --- YORDAMCHI FUNKSIYALAR ---
 async def send_personal_link(message: types.Message, user_id: int):
     link = await create_start_link(bot, str(user_id), encode=False)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -78,7 +89,6 @@ async def start_cmd(message: types.Message, state: FSMContext):
         await message.answer("Xush kelibsiz!")
         await send_personal_link(message, user_id)
 
-# Anonim xabar yuborish mantiqi
 @dp.message(ChatStates.waiting_for_anon_message)
 async def handle_anon(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -87,7 +97,7 @@ async def handle_anon(message: types.Message, state: FSMContext):
     
     try:
         header = "📩 Yangi anonim xabar:\n\n"
-        if int(target_id) == ADMIN_ID:
+        if is_admin(int(target_id)): # Agar xabar adminga borsa, kimligini ko'rsatish
             header = f"👤 Admin uchun (Ism: {message.from_user.full_name}, ID: {message.from_user.id})\n{header}"
         
         await bot.send_message(target_id, header + (message.text or ""), entities=message.entities, reply_markup=kb)
@@ -98,7 +108,6 @@ async def handle_anon(message: types.Message, state: FSMContext):
     except:
         await message.answer("❌ Xatolik! Bot bloklangan bo'lishi mumkin.")
 
-# JAVOB BERISH TUGMASI (Tuzatilgan qism)
 @dp.callback_query(F.data.startswith("reply_"))
 async def start_reply(callback: types.CallbackQuery, state: FSMContext):
     sender_id = callback.data.split("_")[1]
@@ -126,27 +135,29 @@ async def deliver_reply(message: types.Message, state: FSMContext):
 
 @dp.message(Command("admin"))
 async def admin_menu(message: types.Message):
-    if message.from_user.id == ADMIN_ID:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
+    if is_admin(message.from_user.id):
+        kb_list = [
             [InlineKeyboardButton(text="📊 Statistika", callback_data="stats")],
             [InlineKeyboardButton(text="📢 Reklama", callback_data="broadcast")]
-        ])
+        ]
+        # Faqat asosiy egasi adminlarni boshqara oladi
+        if message.from_user.id == ADMIN_ID:
+            kb_list.append([
+                InlineKeyboardButton(text="➕ Admin qo'shish", callback_data="add_adm"),
+                InlineKeyboardButton(text="➖ Admin o'chirish", callback_data="rem_adm")
+            ])
+            
+        kb = InlineKeyboardMarkup(inline_keyboard=kb_list)
         await message.answer("🛠 Admin boshqaruv paneli:", reply_markup=kb)
 
 @dp.callback_query(F.data == "stats")
 async def show_stats(callback: types.CallbackQuery):
     today = datetime.now().date()
     this_month = today.strftime("%Y-%m")
-    
-    # 1. Bugungi javoblar (xabarlar) soni
     cursor.execute("SELECT COUNT(*) FROM messages WHERE sent_at = ?", (today,))
     msg_today = cursor.fetchone()[0]
-    
-    # 2. Bugun botga qo'shilganlar
     cursor.execute("SELECT COUNT(*) FROM users WHERE joined_at = ?", (today,))
     users_today = cursor.fetchone()[0]
-    
-    # 3. Shu oyda qo'shilganlar
     cursor.execute("SELECT COUNT(*) FROM users WHERE joined_at LIKE ?", (f"{this_month}%",))
     users_month = cursor.fetchone()[0]
     
@@ -157,7 +168,49 @@ async def show_stats(callback: types.CallbackQuery):
     await callback.message.answer(text, parse_mode="Markdown")
     await callback.answer()
 
-# Reklama yuborish (Oldingi mantiq saqlangan)
+# --- YANGI ADMIN QO'SHISH FUNKSIYALARI ---
+
+@dp.callback_query(F.data == "add_adm")
+async def add_adm_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id == ADMIN_ID:
+        await state.set_state(ChatStates.waiting_for_new_admin)
+        await callback.message.answer("Yangi adminning Telegram ID raqamini yuboring:")
+    await callback.answer()
+
+@dp.message(ChatStates.waiting_for_new_admin)
+async def process_add_adm(message: types.Message, state: FSMContext):
+    if message.text.isdigit():
+        new_id = int(message.text)
+        cursor.execute("INSERT OR IGNORE INTO admins VALUES (?)", (new_id,))
+        conn.commit()
+        await message.answer(f"✅ ID: {new_id} muvaffaqiyatli admin qilindi!")
+        await state.clear()
+    else:
+        await message.answer("❌ Xato! Faqat raqamlardan iborat ID yuboring.")
+
+@dp.callback_query(F.data == "rem_adm")
+async def rem_adm_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id == ADMIN_ID:
+        await state.set_state(ChatStates.waiting_for_remove_admin)
+        await callback.message.answer("O'chiriladigan adminning ID raqamini yuboring:")
+    await callback.answer()
+
+@dp.message(ChatStates.waiting_for_remove_admin)
+async def process_rem_adm(message: types.Message, state: FSMContext):
+    if message.text.isdigit():
+        rem_id = int(message.text)
+        if rem_id == ADMIN_ID:
+            await message.answer("❌ Asosiy adminni o'chirib bo'lmaydi!")
+        else:
+            cursor.execute("DELETE FROM admins WHERE admin_id = ?", (rem_id,))
+            conn.commit()
+            await message.answer(f"🗑 ID: {rem_id} adminlikdan olindi.")
+        await state.clear()
+    else:
+        await message.answer("❌ Xato! Faqat raqamlardan iborat ID yuboring.")
+
+# --- REKLAMA (BROADCAST) ---
+
 @dp.callback_query(F.data == "broadcast")
 async def br_start(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(ChatStates.waiting_for_broadcast_content)
@@ -195,7 +248,6 @@ async def final_broadcast(message, state, url):
     data = await state.get_data()
     content = data['content']
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Kirish", url=url)]]) if url else None
-    
     cursor.execute("SELECT user_id FROM users")
     users = cursor.fetchall()
     count = 0
