@@ -17,7 +17,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 API_TOKEN = '8672594017:AAElGsXRSz8hVeKRhVJw9URE0eCBb1_XYaI'
 ADMIN_ID = 7861165622 
 APP_URL = "https://shox-smm-bot.onrender.com"
-GOOGLE_SHEET_URL = "SIZNING_GOOGLE_SCRIPT_URL_MANZILINGIZ"
+GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbyVq4gkT8vu1kRdHNKesmES2OwCiJo-Pw-rvxrLlaCuef-rI6LOSA45qIwV2tPGwjJP/exec"
 
 logging.basicConfig(level=logging.INFO)
 
