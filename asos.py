@@ -14,7 +14,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # --- SOZLAMALAR ---
-API_TOKEN = '8672594017:AAElGsXRSz8hVeKRhVJw9URE0eCBb1_XYaI'
+API_TOKEN = '8672594017:AAGuoaoXgGAZEvO1mJlWuHTG3n-Kbe0uW9Q'
 ADMIN_ID = 7861165622 
 APP_URL = "https://shox-smm-bot.onrender.com"
 # SHU YERGA GOOGLE SCRIPT URL MANZILINI QO'YING
