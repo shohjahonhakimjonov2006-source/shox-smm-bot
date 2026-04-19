@@ -31,7 +31,6 @@ cursor.execute("INSERT OR IGNORE INTO admins VALUES (?)", (ADMIN_ID,))
 conn.commit()
 
 class ChatStates(StatesGroup):
-    waiting_for_phone = State()
     waiting_for_anon_message = State()
     waiting_for_reply = State()
     waiting_for_broadcast_content = State()
@@ -54,7 +53,7 @@ async def save_to_google_sheets(name, user_id, username, phone, ref_by, status="
             "id": user_id,
             "username": f"@{username}" if username else "Yo'q",
             "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "phone": phone,
+            "phone": phone if phone else "Yuborilmagan",
             "status": status,
             "ref_by": ref_by
         }
@@ -112,59 +111,28 @@ async def start_cmd(message: types.Message, state: FSMContext):
         except:
             ref_by_name = "Noma'lum"
 
-    cursor.execute("SELECT phone FROM users WHERE user_id = ?", (user_id,))
-    existing_user = cursor.fetchone()
+    # Foydalanuvchini bazaga darhol qo'shish (Telefon so'ramasdan)
+    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+    if not cursor.fetchone():
+        cursor.execute("INSERT OR IGNORE INTO users (user_id, username, joined_at, ref_by) VALUES (?, ?, ?, ?)", 
+                       (user_id, message.from_user.username, datetime.now().date(), ref_by_name))
+        conn.commit()
+        await save_to_google_sheets(message.from_user.full_name, user_id, message.from_user.username, "Yo'q", ref_by_name)
 
-    if not existing_user:
-        # Yangi foydalanuvchi - telefon so'raymiz
-        kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Telefon raqamni yuborish", request_contact=True)]], resize_keyboard=True, one_time_keyboard=True)
-        # target_id ni saqlab qo'yamiz, telefon yuborgach kerak bo'ladi
-        await state.update_data(ref_by_name=ref_by_name, pending_target=target_id)
-        await message.answer(f"Salom {message.from_user.full_name}! Botdan foydalanish uchun telefon raqamingizni yuboring:", reply_markup=kb)
-        await state.set_state(ChatStates.waiting_for_phone)
-    else:
-        # Eski foydalanuvchi
-        if target_id and target_id != str(user_id):
-            await state.update_data(target_id=target_id)
-            await state.set_state(ChatStates.waiting_for_anon_message)
-            await message.answer("📝 Anonim xabaringizni yozing:")
-        else:
-            await message.answer("Xush kelibsiz!")
-            await send_personal_link(message, user_id)
-
-@dp.message(ChatStates.waiting_for_phone, F.contact)
-async def get_phone(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    phone = message.contact.phone_number
-    data = await state.get_data()
-    ref_by = data.get('ref_by_name', "To'g'ridan-to'g'ri")
-    pending_target = data.get('pending_target')
-    
-    cursor.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?, ?)", 
-                   (user_id, message.from_user.username, datetime.now().date(), ref_by, phone))
-    conn.commit()
-    
-    await save_to_google_sheets(message.from_user.full_name, user_id, message.from_user.username, phone, ref_by)
-    await message.answer("✅ Ro'yxatdan o'tdingiz!", reply_markup=types.ReplyKeyboardRemove())
-    
-    if pending_target and pending_target != str(user_id):
-        # Agar havola orqali kirgan bo'lsa, xabar yozishga o'tkazamiz
-        await state.update_data(target_id=pending_target)
+    if target_id and target_id != str(user_id):
+        await state.update_data(target_id=target_id)
         await state.set_state(ChatStates.waiting_for_anon_message)
-        await message.answer("📝 Endi anonim xabaringizni yozishingiz mumkin:")
+        await message.answer("📝 Anonim xabaringizni yozing:")
     else:
+        await message.answer(f"Xush kelibsiz, {message.from_user.full_name}!")
         await send_personal_link(message, user_id)
-        await state.clear()
 
 @dp.message(ChatStates.waiting_for_anon_message)
 async def handle_anon(message: types.Message, state: FSMContext):
     data = await state.get_data()
     target_id = data.get('target_id')
     
-    # Qabul qiluvchi adminmi?
     target_is_admin = is_admin(int(target_id))
-    
-    # Javob berish tugmasi (qabul qiluvchi uchun)
     kb_for_receiver = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✍️ Javob berish", callback_data=f"reply_{message.from_user.id}")
     ]])
@@ -172,9 +140,9 @@ async def handle_anon(message: types.Message, state: FSMContext):
     try:
         header = "📩 Yangi anonim xabar:\n\n"
         if target_is_admin:
-            # Agar admin bo'lsa barcha ma'lumotlarni ko'rsatamiz
             cursor.execute("SELECT phone FROM users WHERE user_id = ?", (message.from_user.id,))
-            user_phone = cursor.fetchone()[0]
+            res = cursor.fetchone()
+            user_phone = res[0] if res and res[0] else "Yuborilmagan"
             header = (f"👤 **Admin uchun ma'lumot:**\n"
                       f"Ism: {message.from_user.full_name}\n"
                       f"ID: {message.from_user.id}\n"
@@ -183,11 +151,9 @@ async def handle_anon(message: types.Message, state: FSMContext):
                       f"{header}")
         
         await bot.send_message(target_id, header + (message.text or ""), entities=message.entities, reply_markup=kb_for_receiver)
-        
         cursor.execute("INSERT INTO messages (sent_at) VALUES (?)", (datetime.now().date(),))
         conn.commit()
         
-        # Yuboruvchi uchun "Yana xabar yuborish" tugmasi
         kb_for_sender = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="🔄 Yana anonim xabar yuborish", callback_data=f"resend_{target_id}")
         ]])
@@ -197,7 +163,6 @@ async def handle_anon(message: types.Message, state: FSMContext):
         await state.clear()
         
     except Exception:
-        await save_to_google_sheets(message.from_user.full_name, target_id, "", "", "", status="Blocked")
         await message.answer("❌ Xatolik! Bot bloklangan bo'lishi mumkin.")
 
 @dp.callback_query(F.data.startswith("resend_"))
@@ -246,6 +211,46 @@ async def admin_menu(message: types.Message):
         kb = InlineKeyboardMarkup(inline_keyboard=kb_list)
         await message.answer("🛠 Admin boshqaruv paneli:", reply_markup=kb)
 
+# Admin qo'shish va o'chirish handlerlari
+@dp.callback_query(F.data == "add_adm")
+async def add_adm_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id == ADMIN_ID:
+        await state.set_state(ChatStates.waiting_for_new_admin)
+        await callback.message.answer("Yangi adminning ID raqamini yuboring:")
+    await callback.answer()
+
+@dp.message(ChatStates.waiting_for_new_admin)
+async def add_adm_finish(message: types.Message, state: FSMContext):
+    try:
+        new_id = int(message.text)
+        cursor.execute("INSERT OR IGNORE INTO admins VALUES (?)", (new_id,))
+        conn.commit()
+        await message.answer(f"✅ {new_id} muvaffaqiyatli admin qilindi.")
+        await state.clear()
+    except ValueError:
+        await message.answer("❌ Xato! Faqat raqamlardan iborat ID yuboring.")
+
+@dp.callback_query(F.data == "rem_adm")
+async def rem_adm_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id == ADMIN_ID:
+        await state.set_state(ChatStates.waiting_for_remove_admin)
+        await callback.message.answer("O'chiriladigan adminning ID raqamini yuboring:")
+    await callback.answer()
+
+@dp.message(ChatStates.waiting_for_remove_admin)
+async def rem_adm_finish(message: types.Message, state: FSMContext):
+    try:
+        rem_id = int(message.text)
+        if rem_id == ADMIN_ID:
+            await message.answer("❌ Asosiy adminni o'chirib bo'lmaydi!")
+        else:
+            cursor.execute("DELETE FROM admins WHERE admin_id = ?", (rem_id,))
+            conn.commit()
+            await message.answer(f"✅ {rem_id} adminlikdan olindi.")
+            await state.clear()
+    except ValueError:
+        await message.answer("❌ Xato! Faqat raqamlardan iborat ID yuboring.")
+
 @dp.callback_query(F.data == "stats")
 async def show_stats(callback: types.CallbackQuery):
     today = datetime.now().date()
@@ -256,25 +261,58 @@ async def show_stats(callback: types.CallbackQuery):
     await callback.message.answer(f"📊 Statistika:\n\nBugun: {msg_today} xabar\nJami: {total_users} user")
     await callback.answer()
 
+# Reklama mantiqi
 @dp.callback_query(F.data == "broadcast")
 async def br_start(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(ChatStates.waiting_for_broadcast_content)
-    await callback.message.answer("Reklama xabarini yuboring:")
+    await callback.message.answer("Reklama xabarini (rasm, video yoki matn) yuboring:")
     await callback.answer()
 
 @dp.message(ChatStates.waiting_for_broadcast_content)
 async def br_content(message: types.Message, state: FSMContext):
-    await state.update_data(content=message)
+    await state.update_data(broadcast_msg=message)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔗 Havola", callback_data="add_link")],
-        [InlineKeyboardButton(text="❌ Havolasiz", callback_data="send_no_link")]
+        [InlineKeyboardButton(text="🔗 Havola qo'shish", callback_data="add_link")],
+        [InlineKeyboardButton(text="❌ Havolasiz yuborish", callback_data="send_no_link")]
     ])
-    await message.answer("Tugmali havola qo'shilsinmi?", reply_markup=kb)
+    await message.answer("Reklamaga tugmali havola qo'shilsinmi?", reply_markup=kb)
+
+@dp.callback_query(F.data == "add_link")
+async def add_link_url(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(ChatStates.waiting_for_link_url)
+    await callback.message.answer("Tugma uchun URL manzilini yuboring (masalan: https://t.me/...):")
+    await callback.answer()
+
+@dp.message(ChatStates.waiting_for_link_url)
+async def process_broadcast_with_link(message: types.Message, state: FSMContext):
+    if not message.text.startswith("http"):
+        await message.answer("❌ Xato! Havola http:// yoki https:// bilan boshlanishi kerak.")
+        return
+
+    data = await state.get_data()
+    broadcast_msg = data['broadcast_msg']
+    url = message.text
+    
+    # "Kirish" tugmasini yaratish
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Kirish", url=url)]])
+    
+    cursor.execute("SELECT user_id FROM users")
+    users = cursor.fetchall()
+    count = 0
+    for u in users:
+        try:
+            await broadcast_msg.copy_to(u[0], reply_markup=kb)
+            count += 1
+            await asyncio.sleep(0.05)
+        except: pass
+    
+    await message.answer(f"✅ Havola bilan {count} ta foydalanuvchiga yuborildi.")
+    await state.clear()
 
 @dp.callback_query(F.data == "send_no_link")
 async def no_link(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    content = data['content']
+    content = data['broadcast_msg']
     cursor.execute("SELECT user_id FROM users")
     users = cursor.fetchall()
     count = 0
